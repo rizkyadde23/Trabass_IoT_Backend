@@ -14,10 +14,12 @@ const snap = new midtransClient.Snap({
 });
 
 /**
- * 1. Endpoint Meminta Token Pembayaran (Create Transaction)
+ * Endpoint Meminta Token Pembayaran (Create Transaction - Auto-Cleanup & Always Unique Order ID)
  * POST /api/rent/create-transaction
  */
 const createRentTransaction = async (req, res) => {
+  const connection = await db.getConnection();
+
   try {
     const { bike_id, user_id, duration_minutes, amount } = req.body;
 
@@ -29,39 +31,66 @@ const createRentTransaction = async (req, res) => {
       });
     }
 
-    // A. Cek Ketersediaan Sepeda
-    const [bikes] = await db.query(
-      "SELECT status, lock_state FROM bikes WHERE bike_id = ?",
+    await connection.beginTransaction();
+
+    // 1. Lock data sepeda
+    const [bikes] = await connection.query(
+      "SELECT status FROM bikes WHERE bike_id = ? FOR UPDATE",
       [bike_id],
     );
-    if (bikes.length === 0) {
+
+    if (bikes.length === 0 || bikes[0].status !== "AVAILABLE") {
+      await connection.rollback();
       return res
-        .status(404)
-        .json({ status: "error", message: "Sepeda tidak ditemukan." });
-    }
-    if (bikes[0].status !== "AVAILABLE") {
-      return res.status(400).json({
-        status: "error",
-        message: "Sepeda sedang digunakan atau tidak tersedia.",
-      });
+        .status(400)
+        .json({ status: "error", message: "Sepeda tidak tersedia." });
     }
 
-    // B. Cek Data User
-    const [users] = await db.query(
+    // 2. AUTO-CLEANUP: Cek apakah user punya transaksi PENDING yang tersangkut di sepeda ini
+    const [pendingRentals] = await connection.query(
+      `SELECT rental_id, midtrans_order_id 
+       FROM rentals 
+       WHERE user_id = ? AND bike_id = ? AND payment_status = 'PENDING' AND rental_status = 'WAITING_PAYMENT'`,
+      [user_id, bike_id],
+    );
+
+    // 3. Batalkan transaksi lama di Midtrans & Database secara eksplisit
+    if (pendingRentals.length > 0) {
+      for (const oldRental of pendingRentals) {
+        console.log(
+          `[AUTO-CLEANUP] Membatalkan order pending lama: ${oldRental.midtrans_order_id}`,
+        );
+
+        try {
+          // Panggil Midtrans Cancel API untuk melepas slot VA/QRIS
+          await snap.transaction.cancel(oldRental.midtrans_order_id);
+        } catch (midtransErr) {
+          // Abaikan jika order di Midtrans memang sudah expired/batal
+          console.warn(`[MIDTRANS CANCEL NOTICE] ${midtransErr.message}`);
+        }
+
+        // Tandai CANCELLED di database MySQL
+        await connection.query(
+          `UPDATE rentals SET payment_status = 'CANCELLED', rental_status = 'CANCELLED' WHERE rental_id = ?`,
+          [oldRental.rental_id],
+        );
+
+        // Hapus cache Redis jika ada
+        await redisClient.del(`snap_token:${oldRental.midtrans_order_id}`);
+      }
+    }
+
+    // 4. SELALU GENERATE ORDER ID BARU YANG UNIK (Menghindari bentrok di Midtrans Engine)
+    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
+    const orderId = `RENT-${bike_id}-${Date.now()}-${randomSuffix}`;
+
+    const [users] = await connection.query(
       "SELECT name, phone_number FROM users WHERE user_id = ?",
       [user_id],
     );
-    if (users.length === 0) {
-      return res
-        .status(404)
-        .json({ status: "error", message: "User tidak ditemukan." });
-    }
-    const user = users[0];
+    const user = users[0] || { name: "User", phone_number: "08123456789" };
 
-    // C. Generate Unique Order ID
-    const orderId = `RENT-${bike_id}-${Date.now()}`;
-
-    // D. Parameter Payload ke Midtrans Snap API
+    // 5. Minta Snap Token Baru dari Midtrans
     const parameter = {
       transaction_details: {
         order_id: orderId,
@@ -81,32 +110,33 @@ const createRentTransaction = async (req, res) => {
       ],
     };
 
-    // E. Dapatkan Snap Token dari Midtrans
     const transaction = await snap.createTransaction(parameter);
     const snapToken = transaction.token;
-    const redirectUrl = transaction.redirect_url;
 
-    // F. Simpan Transaksi PENDING ke Database MySQL
-    await db.query(
+    // 6. Simpan transaksi PENDING baru ke MySQL
+    await connection.query(
       `INSERT INTO rentals (bike_id, user_id, duration_minutes, amount, payment_status, rental_status, midtrans_order_id)
        VALUES (?, ?, ?, ?, 'PENDING', 'WAITING_PAYMENT', ?)`,
       [bike_id, user_id, duration_minutes, amount, orderId],
     );
 
-    console.log(`[MIDTRANS] Order ID dibuat: ${orderId} | Token: ${snapToken}`);
+    await connection.commit();
 
     return res.status(201).json({
       status: "success",
-      message: "Token pembayaran berhasil dibuat",
+      message: "Token pembayaran baru berhasil diproses",
       data: {
         order_id: orderId,
         snap_token: snapToken,
-        redirect_url: redirectUrl,
+        redirect_url: transaction.redirect_url,
       },
     });
   } catch (error) {
-    console.error("[MIDTRANS ERROR] Gagal membuat transaksi:", error.message);
+    await connection.rollback();
+    console.error("[TRANSACTION ERROR]", error.message);
     return res.status(500).json({ status: "error", message: error.message });
+  } finally {
+    connection.release();
   }
 };
 
