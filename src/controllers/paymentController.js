@@ -439,4 +439,5 @@ const extendRentTransaction = async (req, res) => {
 module.exports = {
   createRentTransaction,
   handlePaymentNotification,
+  extendRentTransaction,
 };
