@@ -141,10 +141,10 @@ Dokumen ini berisi panduan alur pengerjaan software *Tracking Bicycle Alert & Se
 ## 📌 Checklist Status Proyek
 
 * [x] **Fase 1:** Infrastruktur Server Node.js, MySQL (XAMPP), Redis Native, Mosquitto MQTT, File `.env`, & Database Schema.
-* [ ] **Fase 2.1:** Controller Telemetri & Ingestion Redis/MySQL.
-* [ ] **Fase 2.2:** Engine Geofencing (Haversine) & Tamper Alarm MPU6050.
-* [ ] **Fase 2.3:** Payment Gateway Midtrans Snap & Webhook.
-* [ ] **Fase 2.4:** Notification Gateway (Fonnte WhatsApp & SMS Fallback).
+* [x] **Fase 2.1:** Controller Telemetri & Ingestion Redis/MySQL.
+* [x] **Fase 2.2:** Engine Geofencing (Haversine) & Tamper Alarm MPU6050.
+* [x] **Fase 2.3:** Payment Gateway Midtrans Snap & Webhook.
+* [x] **Fase 2.4:** Notification Gateway (Fonnte WhatsApp).
 * [ ] **Fase 3.1:** Web App User (PWA Scan QR & Checkout).
 * [ ] **Fase 3.2:** Web Admin Dashboard (Leaflet.js Realtime Map).
 * [ ] **Fase 4.1:** Firmware C++ ESP32 Complete.
