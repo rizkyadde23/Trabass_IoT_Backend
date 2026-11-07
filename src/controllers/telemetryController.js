@@ -2,6 +2,7 @@ const db = require("../config/db");
 const redisClient = require("../config/redis");
 const mqttClient = require("../config/mqtt");
 const { isOutsideGeofence } = require("../services/geofenceService");
+const { sendSecurityAlert } = require("../services/notificationService");
 
 // Koordinat Pusat Pangkalan Utama (Contoh: Area Kampus UPN "Veteran" Yogyakarta)
 const STATION_COORDS = {
@@ -96,6 +97,10 @@ const handleTelemetry = async (topic, message) => {
         `UPDATE bikes SET status = ?, last_latitude = ?, last_longitude = ? WHERE bike_id = ?`,
         [newBikeStatus, lat, lng, bikeId],
       );
+      
+      // Kirim notifikasi darurat ke Admin (No. WA Admin disimpan di .env atau default)
+      const ADMIN_PHONE = process.env.ADMIN_PHONE_NUMBER;
+      sendSecurityAlert(ADMIN_PHONE, bikeId, alertReason);
     } else {
       // Jika kondisi normal, update koordinat terakhir sepeda
       await db.query(

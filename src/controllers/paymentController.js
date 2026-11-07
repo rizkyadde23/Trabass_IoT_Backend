@@ -4,6 +4,7 @@ const db = require("../config/db");
 const redisClient = require("../config/redis");
 const mqttClient = require("../config/mqtt");
 require("dotenv").config();
+const { sendPaymentReceipt } = require("../services/notificationService");
 
 // Inisialisasi Midtrans Snap Instance
 const snap = new midtransClient.Snap({
@@ -39,12 +40,10 @@ const createRentTransaction = async (req, res) => {
         .json({ status: "error", message: "Sepeda tidak ditemukan." });
     }
     if (bikes[0].status !== "AVAILABLE") {
-      return res
-        .status(400)
-        .json({
-          status: "error",
-          message: "Sepeda sedang digunakan atau tidak tersedia.",
-        });
+      return res.status(400).json({
+        status: "error",
+        message: "Sepeda sedang digunakan atau tidak tersedia.",
+      });
     }
 
     // B. Cek Data User
@@ -205,6 +204,26 @@ const handlePaymentNotification = async (req, res) => {
         }),
         { qos: 1 },
       );
+
+      // 5. Ambil data user (nama & nomor HP)
+      const [rentalsWithUser] = await db.query(
+        `SELECT r.bike_id, r.duration_minutes, u.name, u.phone_number 
+   FROM rentals r 
+   JOIN users u ON r.user_id = u.user_id 
+   WHERE r.rental_id = ?`,
+        [rental.rental_id],
+      );
+
+      if (rentalsWithUser.length > 0) {
+        const uData = rentalsWithUser[0];
+        // Kirim Struk WhatsApp secara asynchronous (tanpa menghambat HTTP response webhook)
+        sendPaymentReceipt(
+          uData.phone_number,
+          uData.name,
+          uData.bike_id,
+          uData.duration_minutes,
+        );
+      }
 
       console.log(`[MIDTRANS SUCCESS] Sepeda ${bikeId} berhasil DIBUKA!`);
     } else if (["cancel", "deny", "expire"].includes(transactionStatus)) {
