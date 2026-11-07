@@ -6,13 +6,14 @@ const db = require('./config/db');
 const redisClient = require('./config/redis');
 const mqttClient = require('./config/mqtt');
 const telemetryController = require('./controllers/telemetryController');
+const { initTimerService } = require('./services/timerService'); // <--- Import Timer Service
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// Listener MQTT: Oper seluruh pesan dari topik telemetri ke Telemetry Controller
+// Listener Telemetri MQTT
 mqttClient.on('message', (topic, message) => {
   if (topic.startsWith('bike/telemetry/')) {
     telemetryController.handleTelemetry(topic, message);
@@ -28,7 +29,7 @@ app.get('/health', async (req, res) => {
 
     return res.status(200).json({
       status: 'success',
-      message: 'Backend, MySQL XAMPP, Redis, dan MQTT Broker Berjalan Normal',
+      message: 'Backend, MySQL XAMPP, Redis, MQTT Broker & Timer Engine Berjalan Normal',
       timestamp: dbRes[0].current_time,
       redis_status: redisRes,
       mqtt_connected: mqttClient.connected
@@ -44,4 +45,7 @@ app.get('/health', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[SERVER] Running on http://localhost:${PORT}`);
+  
+  // Jalankan Pengecekan Timer Background Job
+  initTimerService(); // <--- Inisialisasi Timer Engine
 });
