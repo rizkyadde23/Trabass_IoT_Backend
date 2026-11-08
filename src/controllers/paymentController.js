@@ -387,34 +387,36 @@ const handlePaymentNotification = async (req, res) => {
 };
 
 /**
- * 3. Meminta Token Pembayaran untuk Perpanjangan Sewa (Extend)
+ * Meminta Token Pembayaran untuk Perpanjangan Sewa (Extend)
  * POST /api/rent/extend-transaction
  */
 const extendRentTransaction = async (req, res) => {
   try {
-    const { rental_id, duration_minutes, amount } = req.body;
+    const { bike_id, user_id, duration_minutes, amount } = req.body;
 
-    if (!rental_id || !duration_minutes || !amount) {
+    // Validasi parameter wajib (Gunakan bike_id & user_id menggantikan rental_id)
+    if (!bike_id || !user_id || !duration_minutes || !amount) {
       return res.status(400).json({
         status: "error",
         message:
-          "Parameter rental_id, duration_minutes, dan amount wajib diisi.",
+          "Parameter bike_id, user_id, duration_minutes, dan amount wajib diisi.",
       });
     }
 
-    // A. Cari Data Rental Aktif
+    // A. Cari Data Rental Aktif berdasarkan bike_id dan user_id
     const [rentals] = await db.query(
       `SELECT r.rental_id, r.bike_id, r.user_id, r.rental_status, u.name, u.phone_number 
        FROM rentals r 
        JOIN users u ON r.user_id = u.user_id 
-       WHERE r.rental_id = ? AND r.rental_status IN ('ACTIVE', 'WARNING_SENT')`,
-      [rental_id],
+       WHERE r.bike_id = ? AND r.user_id = ? AND r.rental_status IN ('ACTIVE', 'WARNING_SENT')
+       ORDER BY r.rental_id DESC LIMIT 1`,
+      [bike_id, user_id],
     );
 
     if (rentals.length === 0) {
       return res.status(404).json({
         status: "error",
-        message: "Sewa aktif tidak ditemukan atau sudah berakhir.",
+        message: "Sesi sewa aktif tidak ditemukan atau sudah berakhir.",
       });
     }
 
@@ -443,8 +445,7 @@ const extendRentTransaction = async (req, res) => {
 
     const transaction = await snap.createTransaction(parameter);
 
-    // C. Simpan Record Perpanjangan (atau simpan orderId extend ke rental terkait)
-    // Di sini kita catat transaksi extend sementara dengan me-referensi rental_id utama
+    // C. Simpan Record Perpanjangan ke MySQL
     await db.query(
       `INSERT INTO rentals (bike_id, user_id, duration_minutes, amount, payment_status, rental_status, midtrans_order_id)
        VALUES (?, ?, ?, ?, 'PENDING', 'WAITING_EXTEND', ?)`,
@@ -466,8 +467,79 @@ const extendRentTransaction = async (req, res) => {
   }
 };
 
+/**
+ * Memproses Pengembalian Sepeda Manual / Akhiri Sesi Sewa
+ * POST /api/rent/finish
+ */
+const finishRentSession = async (req, res) => {
+  try {
+    const { bike_id, user_id } = req.body;
+
+    if (!bike_id || !user_id) {
+      return res.status(400).json({
+        status: "error",
+        message: "Parameter bike_id dan user_id wajib diisi.",
+      });
+    }
+
+    // 1. Cari rental aktif
+    const [rentals] = await db.query(
+      `SELECT rental_id FROM rentals 
+       WHERE bike_id = ? AND user_id = ? AND rental_status IN ('ACTIVE', 'WARNING_SENT')
+       ORDER BY rental_id DESC LIMIT 1`,
+      [bike_id, user_id],
+    );
+
+    if (rentals.length > 0) {
+      const rentalId = rentals[0].rental_id;
+      // Update status rental menjadi COMPLETED dan catat end_time aktual
+      await db.query(
+        `UPDATE rentals SET rental_status = 'COMPLETED', end_time = NOW() WHERE rental_id = ?`,
+        [rentalId],
+      );
+    }
+
+    // 2. Update status sepeda di MySQL (AVAILABLE & LOCKED)
+    await db.query(
+      `UPDATE bikes SET status = 'AVAILABLE', lock_state = TRUE WHERE bike_id = ?`,
+      [bike_id],
+    );
+
+    // 3. Update status di Redis Hash
+    await redisClient.hSet(`bike:${bike_id}:location`, {
+      lock_state: "true",
+      updated_at: new Date().toISOString(),
+    });
+
+    // 4. Kirim perintah MQTT LOCK ke Hardware ESP32
+    mqttClient.publish(
+      `bike/command/${bike_id}`,
+      JSON.stringify({
+        action: "LOCK",
+        message: "Pengguna telah mengakhiri sesi sewa.",
+        timestamp: new Date().toISOString(),
+      }),
+      { qos: 1 },
+    );
+
+    console.log(
+      `[SESSION FINISHED] Sepeda ${bike_id} dikembalikan oleh User ${user_id} & DILOCK.`,
+    );
+
+    return res.status(200).json({
+      status: "success",
+      message:
+        "Sesi sewa berhasil diakhiri dan kunci sepeda telah terkunci kembali.",
+    });
+  } catch (error) {
+    console.error("[FINISH RENTAL ERROR]", error.message);
+    return res.status(500).json({ status: "error", message: error.message });
+  }
+};
+
 module.exports = {
   createRentTransaction,
   handlePaymentNotification,
   extendRentTransaction,
+  finishRentSession
 };

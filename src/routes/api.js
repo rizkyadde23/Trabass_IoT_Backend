@@ -11,4 +11,7 @@ router.post('/payment/notification', paymentController.handlePaymentNotification
 //Endpoint Extend Transaksi Untuk Menambah Waktu
 router.post('/rent/extend-transaction', paymentController.extendRentTransaction);
 
+// Endpoint Finish Untuk Mengakhiri Sesi Sewa
+router.post('/rent/finish', paymentController.finishRentSession);
+
 module.exports = router;
