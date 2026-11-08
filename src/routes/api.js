@@ -14,4 +14,7 @@ router.post('/rent/extend-transaction', paymentController.extendRentTransaction)
 // Endpoint Finish Untuk Mengakhiri Sesi Sewa
 router.post('/rent/finish', paymentController.finishRentSession);
 
+// Endpoint Confim Untuk Mengkonfirmasi Pembayaran
+router.post('/rent/confirm-payment', paymentController.confirmRentPayment);
+
 module.exports = router;

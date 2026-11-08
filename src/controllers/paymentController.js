@@ -537,9 +537,117 @@ const finishRentSession = async (req, res) => {
   }
 };
 
+/**
+ * Fallback Endpoint: Konfirmasi Pembayaran Sukses dari Client Side
+ * POST /api/rent/confirm-payment
+ */
+const confirmRentPayment = async (req, res) => {
+  let connection;
+  try {
+    const { order_id, bike_id } = req.body;
+
+    if (!order_id || !bike_id) {
+      return res.status(400).json({
+        status: "error",
+        message: "order_id dan bike_id wajib diisi.",
+      });
+    }
+
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // 1. Cari data rental berdasarkan midtrans_order_id
+    const [rentals] = await connection.query(
+      `SELECT rental_id, duration_minutes, payment_status, rental_status 
+       FROM rentals 
+       WHERE midtrans_order_id = ? FOR UPDATE`,
+      [order_id],
+    );
+
+    if (rentals.length === 0) {
+      await connection.rollback();
+      return res
+        .status(404)
+        .json({ status: "error", message: "Data rental tidak ditemukan." });
+    }
+
+    const rental = rentals[0];
+
+    // Jika sudah SETTLED & ACTIVE (misal dari webhook), langsung return sukses
+    if (
+      rental.payment_status === "SETTLED" &&
+      rental.rental_status === "ACTIVE"
+    ) {
+      await connection.commit();
+      return res
+        .status(200)
+        .json({ status: "success", message: "Sesi sewa sudah aktif." });
+    }
+
+    // 2. Set waktu mulai & selesai
+    const startTime = new Date();
+    const endTime = new Date(
+      startTime.getTime() + Number(rental.duration_minutes) * 60000,
+    );
+
+    // 3. Update status rental menjadi SETTLED & ACTIVE
+    await connection.query(
+      `UPDATE rentals 
+       SET payment_status = 'SETTLED', rental_status = 'ACTIVE', start_time = ?, end_time = ? 
+       WHERE rental_id = ?`,
+      [startTime, endTime, rental.rental_id],
+    );
+
+    // 4. Pastikan sepeda berstatus RENTED & Kunci Terbuka
+    await connection.query(
+      `UPDATE bikes SET status = 'RENTED', lock_state = FALSE WHERE bike_id = ?`,
+      [bike_id],
+    );
+
+    await connection.commit();
+
+    // 5. Update Redis & Kirim MQTT UNLOCK ke Hardware
+    try {
+      await redisClient.hSet(`bike:${bike_id}:location`, {
+        lock_state: "false",
+        updated_at: new Date().toISOString(),
+      });
+
+      publishBikeCommand(bike_id, {
+        action: "UNLOCK",
+        message: "Pembayaran sukses, selamat berkendara!",
+        duration_minutes: rental.duration_minutes,
+      });
+    } catch (err) {
+      console.warn("[REDIS/MQTT FALLBACK NOTICE]", err.message);
+    }
+
+    console.log(
+      `[PAYMENT CONFIRMED] Order ${order_id} resmi ACTIVE di Database & Sepeda RENTED.`,
+    );
+
+    return res.status(200).json({
+      status: "success",
+      message: "Sesi sewa berhasil diaktifkan.",
+      data: {
+        rental_id: rental.rental_id,
+        start_time: startTime.toISOString(),
+        end_time: endTime.toISOString(),
+      },
+    });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    console.error("[CONFIRM PAYMENT ERROR]", error.message);
+    return res.status(500).json({ status: "error", message: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 module.exports = {
   createRentTransaction,
   handlePaymentNotification,
   extendRentTransaction,
-  finishRentSession
+  finishRentSession,
+  confirmRentPayment,
 };
