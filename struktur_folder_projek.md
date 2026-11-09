@@ -8,14 +8,18 @@ bicycle-security-backend/
 │   ├── controllers/
 │   │   ├── authController.js      # Registrasi, login, profil & role user
 │   │   ├── adminController.js     # Data armada untuk dashboard admin
-│   │   ├── telemetryController.js # Pengolahan data telemetry & emergency alert
+│   │   ├── commandController.js   # Endpoint remote command & riwayat perintah admin
+│   │   ├── incidentController.js  # Endpoint daftar insiden keamanan
+│   │   ├── telemetryController.js # Pengolahan data telemetry, emergency alert & insiden
 │   │   ├── paymentController.js   # Integration Midtrans Snap & Webhook Handler
 │   │   ├── rentalController.js    # Logika mulai sewa, durasi, & pengembalian
 │   │   └── bikeController.js      # CRUD & status realtime armada sepeda
 │   ├── scripts/
 │   │   └── createAdmin.js         # Seed/promosi akun admin dari .env
 │   ├── services/
+│   │   ├── bikeCommandService.js  # Publish perintah remote, mute alarm & audit admin
 │   │   ├── geofenceService.js     # Logika kalkulasi jarak (Haversine Formula)
+│   │   ├── incidentService.js     # Pencatatan, deduplikasi & resolusi insiden keamanan
 │   │   ├── notificationService.js # WA Gateway (Fonnte) & SMS fallback logic
 │   │   └── timerService.js        # Background timer monitoring sisa waktu sewa
 │   ├── routes/

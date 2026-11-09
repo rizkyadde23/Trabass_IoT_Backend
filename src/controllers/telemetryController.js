@@ -4,6 +4,7 @@ const mqttClient = require("../config/mqtt");
 const station = require("../config/station");
 const { isOutsideGeofence } = require("../services/geofenceService");
 const { sendSecurityAlert } = require("../services/notificationService");
+const incidentService = require("../services/incidentService");
 
 const toNumberOrNull = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -58,6 +59,34 @@ const updateAlertCache = async (bikeId, values) => {
       `[ALERT CACHE] Gagal menyimpan alert ${bikeId}:`,
       error.message,
     );
+  }
+};
+
+/**
+ * Kegagalan pencatatan insiden tidak boleh menghentikan engine alert:
+ * alarm MQTT dan notifikasi WA tetap harus berjalan.
+ */
+const safeOpenIncident = async (payload) => {
+  try {
+    return await incidentService.openIncident(payload);
+  } catch (error) {
+    console.warn(
+      `[INCIDENT] Gagal mencatat insiden ${payload?.bikeId}:`,
+      error.message,
+    );
+    return { created: false, incidentId: null };
+  }
+};
+
+const safeResolveIncidents = async (bikeId, types) => {
+  try {
+    return await incidentService.resolveIncidents(bikeId, types);
+  } catch (error) {
+    console.warn(
+      `[INCIDENT] Gagal menutup insiden ${bikeId}:`,
+      error.message,
+    );
+    return 0;
   }
 };
 
@@ -289,6 +318,54 @@ const handleTelemetry = async (topic, message) => {
         ...(tamperDetected ? { last_motion_at: nowIso } : {}),
       });
 
+      const incidentResults = [];
+
+      if (tamperDetected) {
+        incidentResults.push(
+          await safeOpenIncident({
+            bikeId,
+            type: "TAMPER",
+            severity: "CRITICAL",
+            message: "Gerakan terdeteksi saat sepeda terkunci.",
+            latitude: lat,
+            longitude: lng,
+            speed,
+            lockState,
+            mpuMotion,
+          }),
+        );
+      }
+
+      if (geofenceViolated) {
+        incidentResults.push(
+          await safeOpenIncident({
+            bikeId,
+            type: "GEOFENCE",
+            severity: "HIGH",
+            message: `Sepeda keluar radius aman (${geofenceCheck.distanceMeter}m dari pangkalan).`,
+            latitude: lat,
+            longitude: lng,
+            distanceM: geofenceCheck.distanceMeter,
+            speed,
+            lockState,
+            mpuMotion,
+          }),
+        );
+      }
+
+      const hasNewIncident = incidentResults.some((item) => item.created);
+
+      // Insiden baru tidak boleh tetap dibisukan oleh ALARM_OFF sebelumnya.
+      if (hasNewIncident && alertState.alarm_muted === "true") {
+        await updateAlertCache(bikeId, {
+          alarm_muted: "false",
+          alarm_muted_at: "",
+        });
+      }
+
+      const alarmMuted =
+        alertState.alarm_muted === "true" && !hasNewIncident;
+
       const cooldownType = tamperDetected ? "tamper" : "geofence";
       const shouldNotify = await claimAlertCooldown(
         bikeId,
@@ -301,7 +378,9 @@ const handleTelemetry = async (topic, message) => {
           notified_at: nowIso,
         });
 
-        publishAlarm(bikeId, alertReason);
+        // Buzzer yang sudah dimatikan admin tidak boleh langsung menyala
+        // lagi sebelum ada insiden baru.
+        if (!alarmMuted) publishAlarm(bikeId, alertReason);
         sendAlertAndTrack(bikeId, alertReason);
       }
 
@@ -334,6 +413,30 @@ const handleTelemetry = async (topic, message) => {
       alertState.type === "geofence" ||
       String(alertState.reason || "").includes("GEOFENCE_VIOLATION");
 
+    // Tutup insiden di database berdasarkan kondisi telemetri saat ini.
+    // Ini juga bekerja setelah backend restart walaupun cache Redis kosong.
+    const incidentTypesToResolve = [];
+
+    if (!lockState || quietElapsed) {
+      incidentTypesToResolve.push("TAMPER");
+    }
+
+    if (!geofenceViolated) {
+      incidentTypesToResolve.push("GEOFENCE");
+    }
+
+    const resolvedIncidentCount =
+      incidentTypesToResolve.length > 0
+        ? await safeResolveIncidents(bikeId, incidentTypesToResolve)
+        : 0;
+
+    if (resolvedIncidentCount > 0) {
+      await updateAlertCache(bikeId, {
+        alarm_muted: "false",
+        alarm_muted_at: "",
+      });
+    }
+
     if (shouldResolveTamper || shouldResolveGeofence) {
       const targetStatuses = [];
 
@@ -350,6 +453,8 @@ const handleTelemetry = async (topic, message) => {
           active: "false",
           resolved_at: nowIso,
           resolved_status: resolvedStatus,
+          alarm_muted: "false",
+          alarm_muted_at: "",
         });
 
         console.log(

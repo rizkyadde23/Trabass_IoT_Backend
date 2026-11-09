@@ -78,7 +78,59 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- 6. Seed Data Sepeda Pertama
+-- 6. Insiden Keamanan (riwayat tamper & pelanggaran geofence)
+-- Satu baris mewakili satu kejadian. Baris ACTIVE diperbarui saat
+-- telemetri berikutnya masih mendeteksi kondisi yang sama.
+CREATE TABLE IF NOT EXISTS security_incidents (
+    incident_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    bike_id VARCHAR(20) NOT NULL,
+    -- TAMPER (guncangan MPU6050) atau GEOFENCE (keluar radius pangkalan)
+    incident_type VARCHAR(32) NOT NULL,
+    -- CRITICAL untuk tamper, HIGH untuk geofence
+    severity VARCHAR(16) NOT NULL DEFAULT 'HIGH',
+    -- ACTIVE atau RESOLVED
+    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+    message VARCHAR(255) NOT NULL,
+    latitude DECIMAL(10, 8) NULL,
+    longitude DECIMAL(11, 8) NULL,
+    distance_m DECIMAL(10, 2) NULL,
+    speed DECIMAL(5, 2) NULL,
+    lock_state BOOLEAN NULL,
+    mpu_motion BOOLEAN NULL,
+    detected_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at DATETIME NULL,
+    resolved_by INT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (bike_id) REFERENCES bikes(bike_id) ON DELETE CASCADE,
+    FOREIGN KEY (resolved_by) REFERENCES users(user_id) ON DELETE SET NULL,
+    INDEX idx_incidents_detected (detected_at),
+    INDEX idx_incidents_status (status, detected_at),
+    INDEX idx_incidents_bike (bike_id, detected_at),
+    INDEX idx_incidents_type (incident_type, detected_at)
+) ENGINE=InnoDB;
+
+-- 7. Audit Perintah Admin (force lock/unlock, matikan alarm)
+CREATE TABLE IF NOT EXISTS admin_command_logs (
+    command_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    admin_user_id INT NULL,
+    bike_id VARCHAR(20) NOT NULL,
+    action VARCHAR(32) NOT NULL,
+    mqtt_action VARCHAR(32) NOT NULL,
+    -- SENT atau FAILED
+    status VARCHAR(16) NOT NULL,
+    reason VARCHAR(255) NULL,
+    error_message VARCHAR(255) NULL,
+    ip_address VARCHAR(45) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (admin_user_id) REFERENCES users(user_id) ON DELETE SET NULL,
+    FOREIGN KEY (bike_id) REFERENCES bikes(bike_id) ON DELETE CASCADE,
+    INDEX idx_command_created (created_at),
+    INDEX idx_command_bike (bike_id, created_at),
+    INDEX idx_command_status (status, created_at)
+) ENGINE=InnoDB;
+
+-- 8. Seed Data Sepeda Pertama
 INSERT INTO bikes (bike_id, name, status, lock_state, last_latitude, last_longitude)
 VALUES ('BK-001', 'Sepeda Rental Kampus 01', 'AVAILABLE', TRUE, -7.77351200, 110.38541100)
 ON DUPLICATE KEY UPDATE name=VALUES(name);

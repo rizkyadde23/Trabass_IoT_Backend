@@ -4,6 +4,8 @@ const paymentController = require('../controllers/paymentController');
 const authController = require('../controllers/authController');
 const adminController = require('../controllers/adminController');
 const settingsController = require('../controllers/settingsController');
+const commandController = require('../controllers/commandController');
+const incidentController = require('../controllers/incidentController');
 const authMiddleware = require('../middlewares/authMiddleware');
 const adminMiddleware = require('../middlewares/adminMiddleware');
 
@@ -33,6 +35,13 @@ router.get('/admin/bikes', adminMiddleware, adminController.getBikes);
 // Pengaturan admin: pangkalan, radius geofence, dan pricing
 router.get('/admin/settings', adminMiddleware, settingsController.getSettings);
 router.put('/admin/settings', adminMiddleware, settingsController.updateSettings);
+
+// Remote control: force lock, force unlock, dan matikan alarm
+router.post('/admin/bike-command', adminMiddleware, commandController.sendBikeCommand);
+
+// Riwayat insiden keamanan dan audit perintah admin
+router.get('/admin/incidents', adminMiddleware, incidentController.getIncidents);
+router.get('/admin/command-logs', adminMiddleware, commandController.getCommandLogs);
 
 // Endpoint Membuat Transaksi Sewa & Snap Token
 router.post('/rent/create-transaction', paymentController.createRentTransaction);

@@ -26,6 +26,38 @@ Endpoint daftar armada untuk dashboard admin. Wajib memakai token JWT dengan
 `role = 'admin'`. Data lokasi terbaru digabung dari Redis jika tersedia, dan
 fallback ke koordinat terakhir di MySQL jika Redis belum siap.
 
+### `POST /api/admin/bike-command`
+
+Mengirim perintah remote ke sepeda melalui MQTT topik `bike/command/<bike_id>`.
+
+```json
+{
+  "bike_id": "BK-001",
+  "action": "FORCE_LOCK",
+  "reason": "Opsional, maksimal 255 karakter"
+}
+```
+
+Nilai `action`: `FORCE_LOCK` (MQTT `LOCK`), `FORCE_UNLOCK` (MQTT `UNLOCK`), dan
+`ALARM_OFF` (MQTT `ALARM_OFF`). Response `SENT` berarti perintah sudah diterima
+broker, bukan bukti eksekusi firmware. Setiap pengiriman dicatat di
+`admin_command_logs` dengan status `SENT` atau `FAILED`. `ALARM_OFF` juga
+mengeset `alarm_muted=true` di Redis selama alert masih aktif; mute dibersihkan
+saat insiden selesai atau insiden baru muncul.
+
+### `GET /api/admin/incidents`
+
+Feed insiden keamanan dengan filter `status` (`ACTIVE`/`RESOLVED`), `type`
+(`TAMPER`/`GEOFENCE`), `bike_id`, cursor `after_id`/`before_id`, dan `limit`
+(maksimal 100). Insiden `ACTIVE` yang sama tidak diduplikasi: paket telemetri
+berikutnya hanya memperbarui `last_seen_at`.
+
+### `GET /api/admin/command-logs`
+
+Riwayat audit perintah admin dengan filter `bike_id`, `action`, `status`
+(`SENT`/`FAILED`), cursor, dan `limit`. Tabel `security_incidents` dan
+`admin_command_logs` dibuat otomatis saat backend mulai.
+
 ## Konfigurasi Pembayaran
 
 Tambahkan variabel berikut ke `.env` (lihat `.env.example`):
@@ -100,4 +132,6 @@ Mengakhiri sesi, mengunci sepeda, dan mengirim notifikasi WhatsApp konfirmasi pe
 
 - WhatsApp dikirim melalui Fonnte.
 - Jika WhatsApp gagal, backend mengirim perintah `SEND_SMS` via MQTT ke ESP32.
-- Perintah MQTT yang digunakan: `UNLOCK`, `EXTEND_TIME`, `LOCK`, `LOCK_AND_ALARM`, `WARNING_BEEP`, dan `SEND_SMS`.
+- Perintah MQTT yang digunakan: `UNLOCK`, `EXTEND_TIME`, `LOCK`, `LOCK_AND_ALARM`, `WARNING_BEEP`, `SEND_SMS`, dan `ALARM_OFF`.
+- `ALARM_OFF` memerlukan handler di firmware. Sampai handler tersedia, perintah
+  tetap dikirim dan dicatat, tetapi buzzer belum berhenti.
