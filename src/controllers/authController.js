@@ -7,6 +7,31 @@ const BCRYPT_ROUNDS = 10;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_REGEX = /^08\d{8,13}$/;
 
+/**
+ * jsonwebtoken hanya menerima angka (detik) atau timespan seperti "7d".
+ * Nilai .env yang tidak valid/tergabung dengan baris lain tidak boleh
+ * membuat login gagal total, jadi fallback ke default.
+ */
+const DEFAULT_JWT_EXPIRES_IN = "7d";
+const JWT_TIMESPAN_REGEX = /^\d+(ms|s|m|h|d|w|y)$/i;
+
+const resolveJwtExpiresIn = (value) => {
+  const raw = String(value ?? "").trim();
+
+  if (!raw) return DEFAULT_JWT_EXPIRES_IN;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  if (JWT_TIMESPAN_REGEX.test(raw)) return raw;
+
+  console.warn(
+    `[AUTH CONFIG] JWT_EXPIRES_IN tidak valid ("${raw}"). ` +
+      `Memakai default ${DEFAULT_JWT_EXPIRES_IN}.`,
+  );
+
+  return DEFAULT_JWT_EXPIRES_IN;
+};
+
+const JWT_EXPIRES_IN = resolveJwtExpiresIn(process.env.JWT_EXPIRES_IN);
+
 const normalizeEmail = (value) => String(value || "").trim().toLowerCase();
 
 /**
@@ -44,7 +69,7 @@ const createToken = (user) =>
       role: user.role || "user",
     },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || "7d" },
+    { expiresIn: JWT_EXPIRES_IN },
   );
 
 const validateRegistration = ({ name, email, phoneNumber, password }) => {
