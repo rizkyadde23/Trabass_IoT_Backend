@@ -5,7 +5,8 @@ USE bicycle_security_db;
 CREATE TABLE IF NOT EXISTS bikes (
     bike_id VARCHAR(20) PRIMARY KEY,
     name VARCHAR(50) NOT NULL,
-    status VARCHAR(20) DEFAULT 'AVAILABLE', -- AVAILABLE, RENTED, MAINTENANCE, GEOFENCE_VIOLATION, TAMPER_ALERT
+    -- AVAILABLE, RESERVED, RENTED, OVERDUE, MAINTENANCE, GEOFENCE_VIOLATION, TAMPER_ALERT
+    status VARCHAR(20) DEFAULT 'AVAILABLE',
     lock_state BOOLEAN DEFAULT TRUE,
     last_latitude DECIMAL(10, 8),
     last_longitude DECIMAL(11, 8),
@@ -29,12 +30,24 @@ CREATE TABLE IF NOT EXISTS rentals (
     end_time DATETIME NULL,
     duration_minutes INT NOT NULL,
     amount DECIMAL(10, 2) NOT NULL,
-    payment_status VARCHAR(20) DEFAULT 'PENDING', -- PENDING, SETTLED, EXPIRED, CANCELLED
-    rental_status VARCHAR(20) DEFAULT 'WAITING_PAYMENT', -- WAITING_PAYMENT, ACTIVE, COMPLETED, OVERDUE
+    -- PENDING, SETTLED, EXPIRED, CANCELLED, REFUNDED
+    payment_status VARCHAR(20) DEFAULT 'PENDING',
+    -- WAITING_PAYMENT, WAITING_EXTEND, ACTIVE, WARNING_SENT, OVERDUE,
+    -- COMPLETED, EXPIRED, CANCELLED, EXTENDED, PAID_CONFLICT, EXTENSION_REJECTED
+    rental_status VARCHAR(20) DEFAULT 'WAITING_PAYMENT',
     midtrans_order_id VARCHAR(100) UNIQUE,
+    -- INITIAL untuk sewa baru, EXTENSION untuk perpanjangan
+    rental_type VARCHAR(20) NOT NULL DEFAULT 'INITIAL',
+    -- Menunjuk ke rental utama jika rental_type = EXTENSION
+    parent_rental_id INT NULL,
+    payment_processed_at DATETIME NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (bike_id) REFERENCES bikes(bike_id) ON DELETE CASCADE,
-    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    INDEX idx_rentals_bike_status (bike_id, rental_status),
+    INDEX idx_rentals_parent (parent_rental_id),
+    CONSTRAINT fk_rentals_parent
+        FOREIGN KEY (parent_rental_id) REFERENCES rentals(rental_id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- 4. Tabel Log Telemetri GPS (Riwayat Perjalanan)

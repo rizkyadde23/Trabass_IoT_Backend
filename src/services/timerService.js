@@ -1,103 +1,254 @@
 const db = require("../config/db");
 const redisClient = require("../config/redis");
 const mqttClient = require("../config/mqtt");
-const { sendTimeWarning } = require("./notificationService");
+const {
+  sendTimeWarning,
+  sendRentalExpired,
+  sendSecurityAlert,
+} = require("./notificationService");
 
 // Ambang batas waktu peringatan (misal: 5 menit sebelum sewa habis)
 const WARNING_THRESHOLD_SECONDS = 300;
+const PAYMENT_EXPIRY_MINUTES = Number(
+  process.env.PAYMENT_EXPIRY_MINUTES || 15,
+);
+
+const publishBikeCommand = (bikeId, payload) => {
+  const topic = `bike/command/${bikeId}`;
+  return new Promise((resolve, reject) => {
+    mqttClient.publish(topic, JSON.stringify(payload), { qos: 1 }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+};
+
+const publishBikeCommandSafely = async (bikeId, payload) => {
+  try {
+    await publishBikeCommand(bikeId, payload);
+    console.log(`[MQTT PUB] ${bikeId} -> ${payload.action}`);
+  } catch (error) {
+    console.error(
+      `[MQTT ERROR] Gagal publish ${payload.action} ke ${bikeId}:`,
+      error.message,
+    );
+  }
+};
+
+const updateBikeCache = async (bikeId, lockState) => {
+  try {
+    await redisClient.hSet(`bike:${bikeId}:location`, {
+      lock_state: lockState ? "true" : "false",
+      updated_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error(
+      `[REDIS ERROR] Gagal update cache bike ${bikeId}:`,
+      error.message,
+    );
+  }
+};
+
+const releaseBikeReservation = async (connection, bikeId) => {
+  const [bikes] = await connection.query(
+    "SELECT status FROM bikes WHERE bike_id = ? FOR UPDATE",
+    [bikeId],
+  );
+
+  if (bikes.length === 0 || bikes[0].status !== "RESERVED") return false;
+
+  const [otherPending] = await connection.query(
+    `SELECT rental_id
+     FROM rentals
+     WHERE bike_id = ?
+       AND payment_status = 'PENDING'
+       AND rental_status IN ('WAITING_PAYMENT', 'WAITING_EXTEND')
+     LIMIT 1`,
+    [bikeId],
+  );
+
+  if (otherPending.length > 0) return false;
+
+  const [otherActive] = await connection.query(
+    `SELECT rental_id
+     FROM rentals
+     WHERE bike_id = ?
+       AND rental_status IN ('ACTIVE', 'WARNING_SENT', 'OVERDUE')
+     LIMIT 1`,
+    [bikeId],
+  );
+
+  if (otherActive.length > 0) return false;
+
+  await connection.query(
+    "UPDATE bikes SET status = 'AVAILABLE', lock_state = TRUE WHERE bike_id = ?",
+    [bikeId],
+  );
+
+  return true;
+};
+
+/**
+ * Memproses satu rental dengan row lock agar tidak bentrok dengan
+ * webhook pembayaran atau proses extend.
+ */
+const processRentalTimer = async (rentalId) => {
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const [rentals] = await connection.query(
+      `SELECT
+         r.rental_id,
+         r.bike_id,
+         r.user_id,
+         r.end_time,
+         r.rental_status,
+         r.payment_status,
+         u.phone_number,
+         u.name AS user_name
+       FROM rentals r
+       JOIN users u ON u.user_id = r.user_id
+       WHERE r.rental_id = ?
+       FOR UPDATE`,
+      [rentalId],
+    );
+
+    if (rentals.length === 0) {
+      await connection.commit();
+      return;
+    }
+
+    const rental = rentals[0];
+
+    if (
+      rental.payment_status !== "SETTLED" ||
+      !["ACTIVE", "WARNING_SENT"].includes(rental.rental_status)
+    ) {
+      await connection.commit();
+      return;
+    }
+
+    const [timeRows] = await connection.query(
+      `SELECT TIMESTAMPDIFF(SECOND, NOW(), end_time) AS remaining_seconds
+       FROM rentals
+       WHERE rental_id = ?`,
+      [rentalId],
+    );
+
+    const remainingSeconds = Number(timeRows[0].remaining_seconds);
+
+    // -----------------------------------------------------------------
+    // SKENARIO A: WAKTU HABIS
+    // -----------------------------------------------------------------
+    if (remainingSeconds <= 0) {
+      await connection.query(
+        `UPDATE rentals SET rental_status = 'OVERDUE' WHERE rental_id = ?`,
+        [rentalId],
+      );
+
+      await connection.query(
+        `UPDATE bikes
+         SET status = 'OVERDUE', lock_state = TRUE
+         WHERE bike_id = ?`,
+        [rental.bike_id],
+      );
+
+      await connection.commit();
+
+      void updateBikeCache(rental.bike_id, true);
+      void publishBikeCommandSafely(rental.bike_id, {
+        action: "LOCK_AND_ALARM",
+        reason: "RENTAL_TIME_EXPIRED",
+        message: "Waktu sewa habis. Sepeda dikunci otomatis.",
+        timestamp: new Date().toISOString(),
+      });
+
+      if (rental.phone_number) {
+        void sendRentalExpired(rental.phone_number, rental.bike_id);
+      }
+
+      const adminPhone = process.env.ADMIN_PHONE_NUMBER;
+      if (adminPhone) {
+        void sendSecurityAlert(
+          adminPhone,
+          rental.bike_id,
+          "RENTAL_TIME_EXPIRED",
+        );
+      }
+
+      console.warn(
+        `[! TIMER EXPIRED !] Sewa sepeda ${rental.bike_id} telah habis. Status: OVERDUE.`,
+      );
+      return;
+    }
+
+    // -----------------------------------------------------------------
+    // SKENARIO B: WARNING HAMPIR HABIS
+    // -----------------------------------------------------------------
+    if (
+      remainingSeconds <= WARNING_THRESHOLD_SECONDS &&
+      rental.rental_status === "ACTIVE"
+    ) {
+      const remainingMinutes = Math.ceil(remainingSeconds / 60);
+
+      await connection.query(
+        `UPDATE rentals SET rental_status = 'WARNING_SENT' WHERE rental_id = ?`,
+        [rentalId],
+      );
+
+      await connection.commit();
+
+      if (rental.phone_number) {
+        void sendTimeWarning(
+          rental.phone_number,
+          rental.bike_id,
+          remainingMinutes,
+        );
+      }
+
+      void publishBikeCommandSafely(rental.bike_id, {
+        action: "WARNING_BEEP",
+        reason: "TIME_RUNNING_OUT",
+        remaining_minutes: remainingMinutes,
+        message: `Sisa waktu sewa ${remainingMinutes} menit. Segera perpanjang atau kembalikan sepeda.`,
+        timestamp: new Date().toISOString(),
+      });
+
+      console.log(
+        `[TIMER WARNING] Sepeda ${rental.bike_id} tersisa ${remainingMinutes} menit.`,
+      );
+      return;
+    }
+
+    await connection.commit();
+  } catch (error) {
+    try {
+      await connection.rollback();
+    } catch (_) {
+      // Abaikan error rollback.
+    }
+    console.error(
+      `[TIMER SERVICE ERROR] Gagal memproses rental ${rentalId}:`,
+      error.message,
+    );
+  } finally {
+    connection.release();
+  }
+};
 
 const checkRentalTimers = async () => {
   try {
-    // 1. Ambil semua rental yang sedang berjalan (status ACTIVE atau WARNING_SENT)
     const [activeRentals] = await db.query(`
-      SELECT r.rental_id, r.bike_id, r.user_id, r.end_time, r.rental_status, u.phone_number, u.name AS user_name
-      FROM rentals r
-      JOIN users u ON r.user_id = u.user_id
-      WHERE r.rental_status IN ('ACTIVE', 'WARNING_SENT') 
-        AND r.payment_status = 'SETTLED'
+      SELECT rental_id
+      FROM rentals
+      WHERE rental_status IN ('ACTIVE', 'WARNING_SENT')
+        AND payment_status = 'SETTLED'
     `);
 
-    const now = new Date();
-
     for (const rental of activeRentals) {
-      const endTime = new Date(rental.end_time);
-      const remainingSeconds = Math.floor((endTime - now) / 1000);
-
-      const bikeId = rental.bike_id;
-      const commandTopic = `bike/command/${bikeId}`;
-
-      // -------------------------------------------------------------
-      // SKENARIO A: WAKTU HABIS (Sisa Waktu <= 0 Detik)
-      // -------------------------------------------------------------
-      if (remainingSeconds <= 0) {
-        console.warn(
-          `[! TIMER EXPIRED !] Sewa sepeda ${bikeId} telah habis! Mengunci sepeda...`,
-        );
-
-        // 1. Publish Perintah LOCK & ALARM ke Sepeda via MQTT
-        mqttClient.publish(
-          commandTopic,
-          JSON.stringify({
-            action: "LOCK_AND_ALARM",
-            reason: "RENTAL_TIME_EXPIRED",
-            message: "Waktu sewa habis. Sepeda dikunci otomatis.",
-            timestamp: new Date().toISOString(),
-          }),
-          { qos: 1 },
-        );
-
-        // 2. Update Status Rental di MySQL menjadi COMPLETED / EXPIRED
-        await db.query(
-          `UPDATE rentals SET rental_status = 'EXPIRED' WHERE rental_id = ?`,
-          [rental.rental_id],
-        );
-
-        // 3. Update Status Sepeda di MySQL & Redis
-        await db.query(
-          `UPDATE bikes SET lock_state = TRUE, status = 'AVAILABLE' WHERE bike_id = ?`,
-          [bikeId],
-        );
-
-        await redisClient.hSet(`bike:${bikeId}:location`, {
-          lock_state: "true",
-          updated_at: new Date().toISOString(),
-        });
-
-        // -------------------------------------------------------------
-        // SKENARIO B: WARNING HAMPIR HABIS (<= 5 Menit)
-        // -------------------------------------------------------------
-      } else if (
-        remainingSeconds <= WARNING_THRESHOLD_SECONDS &&
-        rental.rental_status === "ACTIVE"
-      ) {
-        const remainingMinutes = Math.ceil(remainingSeconds / 60);
-        // Kirim WA Warning ke User
-        if (rental.phone_number) {
-          sendTimeWarning(rental.phone_number, bikeId, remainingMinutes);
-        }
-        console.log(
-          `[TIMER WARNING] Sepeda ${bikeId} tersisa ${remainingMinutes} menit.`,
-        );
-
-        // 1. Publish Perintah BEEP Peringatan ke Sepeda
-        mqttClient.publish(
-          commandTopic,
-          JSON.stringify({
-            action: "WARNING_BEEP",
-            reason: "TIME_RUNNING_OUT",
-            remaining_minutes: remainingMinutes,
-            message: `Sisa waktu sewa ${remainingMinutes} menit. Segera perpanjang atau kembalikan sepeda.`,
-            timestamp: new Date().toISOString(),
-          }),
-          { qos: 1 },
-        );
-
-        // 2. Update Status Rental menjadi 'WARNING_SENT' agar tidak membunyikan warning berulang kali
-        await db.query(
-          `UPDATE rentals SET rental_status = 'WARNING_SENT' WHERE rental_id = ?`,
-          [rental.rental_id],
-        );
-      }
+      await processRentalTimer(rental.rental_id);
     }
   } catch (error) {
     console.error(
@@ -108,16 +259,105 @@ const checkRentalTimers = async () => {
 };
 
 /**
- * Inisialisasi background job timer (Menjalankan pengecekan setiap 10 detik)
+ * Membersihkan rental PENDING yang melewati batas waktu pembayaran.
+ * Mencegah sepeda tertahan di status RESERVED jika webhook expire tidak datang.
+ */
+const cleanupStalePendingPayments = async () => {
+  try {
+    const [pendingRentals] = await db.query(
+      `SELECT rental_id
+       FROM rentals
+       WHERE payment_status = 'PENDING'
+         AND created_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
+      [PAYMENT_EXPIRY_MINUTES],
+    );
+
+    for (const pending of pendingRentals) {
+      const connection = await db.getConnection();
+
+      try {
+        await connection.beginTransaction();
+
+        const [rentals] = await connection.query(
+          `SELECT rental_id, bike_id, rental_type, payment_status
+           FROM rentals
+           WHERE rental_id = ?
+           FOR UPDATE`,
+          [pending.rental_id],
+        );
+
+        if (
+          rentals.length === 0 ||
+          rentals[0].payment_status !== "PENDING"
+        ) {
+          await connection.commit();
+          continue;
+        }
+
+        const rental = rentals[0];
+
+        await connection.query(
+          `UPDATE rentals
+           SET payment_status = 'EXPIRED',
+               rental_status = 'CANCELLED',
+               payment_processed_at = NOW()
+           WHERE rental_id = ?`,
+          [rental.rental_id],
+        );
+
+        let released = false;
+
+        if (rental.rental_type !== "EXTENSION") {
+          released = await releaseBikeReservation(
+            connection,
+            rental.bike_id,
+          );
+        }
+
+        await connection.commit();
+
+        if (released) {
+          void updateBikeCache(rental.bike_id, true);
+        }
+
+        console.log(
+          `[PAYMENT CLEANUP] Rental ${rental.rental_id} (${rental.rental_type}) kedaluwarsa.`,
+        );
+      } catch (error) {
+        try {
+          await connection.rollback();
+        } catch (_) {
+          // Abaikan error rollback.
+        }
+        console.error(
+          `[PAYMENT CLEANUP ERROR] Rental ${pending.rental_id}:`,
+          error.message,
+        );
+      } finally {
+        connection.release();
+      }
+    }
+  } catch (error) {
+    console.error(
+      "[PAYMENT CLEANUP ERROR] Gagal membersihkan pending payment:",
+      error.message,
+    );
+  }
+};
+
+/**
+ * Inisialisasi background job timer.
  */
 const initTimerService = () => {
   console.log(
     "[TIMER SERVICE] Engine Pengecekan Durasi Sewa Aktif (Interval: 10s)",
   );
   setInterval(checkRentalTimers, 10000); // 10000 ms = 10 detik
+  setInterval(cleanupStalePendingPayments, 60000); // 60 detik
 };
 
 module.exports = {
   initTimerService,
   checkRentalTimers,
+  cleanupStalePendingPayments,
 };
