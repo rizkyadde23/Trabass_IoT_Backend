@@ -4,6 +4,27 @@
 
 - Instalasi baru: jalankan `schema.sql`.
 - Database yang sudah ada: jalankan `migration_payment_refactor.sql`.
+- Untuk fitur dashboard admin, jalankan juga `migration_admin_role.sql`.
+
+## Setup Role Admin & Dashboard
+
+1. Pastikan migrasi role sudah dijalankan.
+2. Tambahkan konfigurasi akun admin ke `.env`:
+   ```env
+   ADMIN_NAME=Admin Trabass
+   ADMIN_EMAIL=admin@trabass.local
+   ADMIN_PASSWORD=ubah-password-ini
+   ADMIN_PHONE_NUMBER=08xxxxxxxxxx
+   ```
+3. Jalankan `npm run seed:admin`. Script ini membuat akun admin baru atau
+   mempromosikan akun dengan email yang sama menjadi `role = 'admin'`.
+4. Login ulang di frontend. Token JWT lama belum memiliki klaim `role`.
+
+### `GET /api/admin/bikes`
+
+Endpoint daftar armada untuk dashboard admin. Wajib memakai token JWT dengan
+`role = 'admin'`. Data lokasi terbaru digabung dari Redis jika tersedia, dan
+fallback ke koordinat terakhir di MySQL jika Redis belum siap.
 
 ## Konfigurasi Pembayaran
 

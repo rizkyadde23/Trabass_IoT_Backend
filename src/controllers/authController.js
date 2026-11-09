@@ -31,13 +31,18 @@ const sanitizeUser = (user) => ({
   user_id: user.user_id,
   name: user.name,
   email: user.email,
+  role: user.role || "user",
   phone_number: user.phone_number,
   created_at: user.created_at,
 });
 
 const createToken = (user) =>
   jwt.sign(
-    { user_id: user.user_id, email: user.email },
+    {
+      user_id: user.user_id,
+      email: user.email,
+      role: user.role || "user",
+    },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || "7d" },
   );
@@ -144,7 +149,7 @@ const register = async (req, res) => {
     }
 
     const [rows] = await db.query(
-      `SELECT user_id, name, email, phone_number, created_at
+      `SELECT user_id, name, email, phone_number, role, created_at
        FROM users
        WHERE user_id = ?`,
       [userId],
@@ -193,7 +198,7 @@ const login = async (req, res) => {
     }
 
     const [rows] = await db.query(
-      `SELECT user_id, name, email, password_hash, phone_number, created_at
+      `SELECT user_id, name, email, password_hash, phone_number, role, created_at
        FROM users
        WHERE email = ?
        LIMIT 1`,
@@ -243,7 +248,7 @@ const login = async (req, res) => {
 const getMe = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT user_id, name, email, phone_number, created_at
+      `SELECT user_id, name, email, phone_number, role, created_at
        FROM users
        WHERE user_id = ?`,
       [req.user.user_id],

@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const paymentController = require('../controllers/paymentController');
 const authController = require('../controllers/authController');
+const adminController = require('../controllers/adminController');
 const authMiddleware = require('../middlewares/authMiddleware');
+const adminMiddleware = require('../middlewares/adminMiddleware');
 
 // ---------------------------------------------------------------------------
 // Route publik
@@ -23,6 +25,9 @@ router.use(authMiddleware);
 
 // Profil user yang sedang login
 router.get('/auth/me', authController.getMe);
+
+// Dashboard admin: daftar seluruh armada
+router.get('/admin/bikes', adminMiddleware, adminController.getBikes);
 
 // Endpoint Membuat Transaksi Sewa & Snap Token
 router.post('/rent/create-transaction', paymentController.createRentTransaction);

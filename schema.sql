@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS users (
     name VARCHAR(100) NOT NULL,
     email VARCHAR(150) NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
+    -- user: penyewa PWA, admin: pengelola dashboard monitoring
+    role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
     phone_number VARCHAR(20) NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_users_email (email),
