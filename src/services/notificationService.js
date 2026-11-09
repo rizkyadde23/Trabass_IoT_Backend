@@ -1,14 +1,14 @@
-const axios = require('axios');
-const mqttClient = require('../config/mqtt');
-require('dotenv').config();
+const axios = require("axios");
+const mqttClient = require("../config/mqtt");
+require("dotenv").config();
 
 /**
  * Format tanggal agar konsisten saat ditampilkan di WhatsApp/SMS.
  */
 const formatDateTime = (value) => {
-  if (!value) return '-';
+  if (!value) return "-";
   const date = value instanceof Date ? value : new Date(value);
-  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('id-ID');
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString("id-ID");
 };
 
 /**
@@ -19,31 +19,31 @@ const formatDateTime = (value) => {
  */
 const sendWhatsApp = async (target, message, bikeId = null) => {
   if (!target) {
-    console.warn('[WA SKIP] Nomor tujuan notifikasi tidak tersedia.');
+    console.warn("[WA SKIP] Nomor tujuan notifikasi tidak tersedia.");
     return false;
   }
 
   try {
     const response = await axios.post(
-      'https://api.fonnte.com/send',
+      "https://api.fonnte.com/send",
       {
         target: target,
         message: message,
-        countryCode: '62' // Default Indonesia
+        countryCode: "62", // Default Indonesia
       },
       {
         headers: {
-          Authorization: process.env.FONNTE_TOKEN
+          Authorization: process.env.FONNTE_TOKEN,
         },
-        timeout: 5000 // Timeout 5 detik
-      }
+        timeout: 5000, // Timeout 5 detik
+      },
     );
 
     if (response.data && response.data.status) {
       console.log(`[WA SENT] WhatsApp berhasil terkirim ke ${target}`);
       return true;
     } else {
-      throw new Error(response.data.reason || 'Gagal terkirim dari Fonnte');
+      throw new Error(response.data.reason || "Gagal terkirim dari Fonnte");
     }
   } catch (error) {
     console.error(`[WA ERROR] Gagal kirim WA ke ${target}:`, error.message);
@@ -52,13 +52,19 @@ const sendWhatsApp = async (target, message, bikeId = null) => {
     // FALLBACK MECHANISM: Jika WA gagal/offline, minta GSM Module ESP32 kirim SMS
     // -------------------------------------------------------------
     if (bikeId) {
-      console.warn(`[SMS FALLBACK] Mengirim instruksi SMS via ESP32 GSM Module untuk ${bikeId}...`);
+      console.warn(
+        `[SMS FALLBACK] Mengirim instruksi SMS via ESP32 GSM Module untuk ${bikeId}...`,
+      );
       const commandTopic = `bike/command/${bikeId}`;
-      mqttClient.publish(commandTopic, JSON.stringify({
-        action: 'SEND_SMS',
-        target_phone: target,
-        message: message.substring(0, 140) // Batasi 140 karakter SMS
-      }), { qos: 1 });
+      mqttClient.publish(
+        commandTopic,
+        JSON.stringify({
+          action: "SEND_SMS",
+          target_phone: target,
+          message: message.substring(0, 140), // Batasi 140 karakter SMS
+        }),
+        { qos: 1 },
+      );
     }
     return false;
   }
@@ -67,11 +73,18 @@ const sendWhatsApp = async (target, message, bikeId = null) => {
 /**
  * Template Pesan Bukti Pembayaran Sewa Baru
  */
-const sendPaymentReceipt = async (userPhone, userName, bikeId, durationMinutes, endTime = null) => {
-  const endTimeText = endTime ? `\n• Selesai: *${formatDateTime(endTime)}*` : '';
+const sendPaymentReceipt = async (
+  userPhone,
+  userName,
+  bikeId,
+  durationMinutes,
+  endTime = null,
+) => {
+  const endTimeText = endTime
+    ? `\n• Selesai: *${formatDateTime(endTime)}*`
+    : "";
 
-  const text =
-`🚴 *SEHATYUK BICYCLE RENTAL* 🚴
+  const text = `🚴 *TRABASS BICYCLE RENTAL* 🚴
 
 Halo *${userName}*,
 Pembayaran sewa sepeda berhasil dikonfirmasi! Kunci sepeda telah terbuka otomatis.
@@ -89,11 +102,18 @@ Selamat berkendara & utamakan keselamatan! Jika durasi habis, sepeda akan terkun
 /**
  * Template Pesan Bukti Perpanjangan Sewa
  */
-const sendExtensionReceipt = async (userPhone, userName, bikeId, addedMinutes, newEndTime = null) => {
-  const endTimeText = newEndTime ? `\n• Waktu selesai baru: *${formatDateTime(newEndTime)}*` : '';
+const sendExtensionReceipt = async (
+  userPhone,
+  userName,
+  bikeId,
+  addedMinutes,
+  newEndTime = null,
+) => {
+  const endTimeText = newEndTime
+    ? `\n• Waktu selesai baru: *${formatDateTime(newEndTime)}*`
+    : "";
 
-  const text =
-`🚴 *SEHATYUK BICYCLE RENTAL* 🚴
+  const text = `🚴 *TRABASS BICYCLE RENTAL* 🚴
 
 Halo *${userName}*,
 Perpanjangan sewa sepeda berhasil dikonfirmasi.
@@ -111,8 +131,7 @@ Selamat berkendara & utamakan keselamatan!`;
  * Template Pesan Konfirmasi Pengembalian Sepeda
  */
 const sendReturnReceipt = async (userPhone, userName, bikeId) => {
-  const text =
-`🚴 *SEHATYUK BICYCLE RENTAL* 🚴
+  const text = `🚴 *TRABASS BICYCLE RENTAL* 🚴
 
 Halo *${userName}*,
 Sesi sewa sepeda *${bikeId}* telah berhasil diakhiri.
@@ -129,8 +148,7 @@ Terima kasih telah menggunakan layanan kami.`;
  * Template Peringatan Sisa Waktu Sewa
  */
 const sendTimeWarning = async (userPhone, bikeId, remainingMinutes) => {
-  const text =
-`⚠️ *PERINGATAN DURASI SEWA* ⚠️
+  const text = `⚠️ *PERINGATAN DURASI SEWA* ⚠️
 
 Sepeda *${bikeId}* tersisa waktu *${remainingMinutes} Menit* lagi!
 
@@ -143,8 +161,7 @@ Harap segera kembalikan sepeda ke pangkalan atau lakukan perpanjangan waktu sewa
  * Template Peringatan Waktu Sewa Habis
  */
 const sendRentalExpired = async (userPhone, bikeId) => {
-  const text =
-`⚠️ *WAKTU SEWA HABIS* ⚠️
+  const text = `⚠️ *WAKTU SEWA HABIS* ⚠️
 
 Waktu sewa sepeda *${bikeId}* telah habis. Sistem telah mengunci sepeda secara otomatis dan mengaktifkan alarm.
 
@@ -157,8 +174,7 @@ Harap segera mengembalikan sepeda ke pangkalan resmi atau hubungi admin jika ing
  * Template Peringatan Keamanan Darurat (Ke Admin / User)
  */
 const sendSecurityAlert = async (targetPhone, bikeId, reason) => {
-  const text =
-`🚨 *ALERT KEAMANAN SEPEDA* 🚨
+  const text = `🚨 *ALERT KEAMANAN SEPEDA* 🚨
 
 Perhatian! Terdeteksi indikasi anomali pada armada sepeda *${bikeId}*:
 • Indikasi: *${reason}*
@@ -173,17 +189,22 @@ Sistem telah membunyikan alarm sirene secara otomatis pada sepeda.`;
  * Template Peringatan Konflik Pembayaran
  * Dipakai ketika pembayaran sudah diterima Midtrans, tetapi sesi tidak dapat diaktifkan.
  */
-const sendPaymentConflictAlert = async (targetPhone, bikeId, reason, orderId, isAdmin = false) => {
+const sendPaymentConflictAlert = async (
+  targetPhone,
+  bikeId,
+  reason,
+  orderId,
+  isAdmin = false,
+) => {
   const followUp = isAdmin
-    ? 'Mohon cek dashboard dan proses refund/manual action.'
-    : 'Pembayaran Anda sudah diterima, tetapi sesi sewa tidak dapat diaktifkan. Admin akan menghubungi Anda untuk proses pengembalian dana.';
+    ? "Mohon cek dashboard dan proses refund/manual action."
+    : "Pembayaran Anda sudah diterima, tetapi sesi sewa tidak dapat diaktifkan. Admin akan menghubungi Anda untuk proses pengembalian dana.";
 
-  const text =
-`🚨 *PEMBAYARAN PERLU TINDAK LANJUT* 🚨
+  const text = `🚨 *PEMBAYARAN PERLU TINDAK LANJUT* 🚨
 
-Order ID: *${orderId || '-'}*
-ID Sepeda: *${bikeId || '-'}*
-Alasan: *${reason || 'PAYMENT_CONFLICT'}*
+Order ID: *${orderId || "-"}*
+ID Sepeda: *${bikeId || "-"}*
+Alasan: *${reason || "PAYMENT_CONFLICT"}*
 Waktu: *${formatDateTime(new Date())}*
 
 ${followUp}`;
@@ -199,5 +220,5 @@ module.exports = {
   sendTimeWarning,
   sendRentalExpired,
   sendSecurityAlert,
-  sendPaymentConflictAlert
+  sendPaymentConflictAlert,
 };
