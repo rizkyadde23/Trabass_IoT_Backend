@@ -1,5 +1,6 @@
 const db = require("../config/db");
 const redisClient = require("../config/redis");
+const station = require("../config/station");
 
 const toNumberOrNull = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -8,12 +9,19 @@ const toNumberOrNull = (value) => {
   return Number.isFinite(parsed) ? parsed : null;
 };
 
-const toBoolean = (value, fallback = true) => {
+const toBoolean = (value, fallback = false) => {
   if (value === null || value === undefined || value === "") return fallback;
 
   if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
 
-  return value === 1 || value === "1" || value === "true";
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on", "locked"].includes(normalized)) return true;
+  if (["0", "false", "no", "off", "unlocked"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
 };
 
 /**
@@ -39,7 +47,31 @@ const readLiveLocation = async (bikeId) => {
   }
 };
 
-const mapBike = (row, liveLocation) => {
+const readAlertState = async (bikeId) => {
+  try {
+    if (!redisClient.isReady) return null;
+
+    const alert = await redisClient.hGetAll(`bike:${bikeId}:alert`);
+
+    if (!alert || Object.keys(alert).length === 0) return null;
+
+    return alert;
+  } catch (error) {
+    console.warn(
+      `[ADMIN] Gagal membaca alert Redis untuk ${bikeId}:`,
+      error.message,
+    );
+    return null;
+  }
+};
+
+const mapNotified = (value) => {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+};
+
+const mapBike = (row, liveLocation, alertState) => {
   const hasLiveLocation = Boolean(liveLocation);
   const latitude = hasLiveLocation
     ? toNumberOrNull(liveLocation.lat)
@@ -47,20 +79,27 @@ const mapBike = (row, liveLocation) => {
   const longitude = hasLiveLocation
     ? toNumberOrNull(liveLocation.lng)
     : toNumberOrNull(row.last_longitude);
+  const lockState = hasLiveLocation
+    ? toBoolean(liveLocation.lock_state, toBoolean(row.lock_state))
+    : toBoolean(row.lock_state);
+  const mpuMotion = hasLiveLocation
+    ? toBoolean(liveLocation.mpu_motion, false)
+    : false;
 
   return {
     bike_id: row.bike_id,
     name: row.name,
     status: row.status,
-    lock_state: hasLiveLocation
-      ? toBoolean(liveLocation.lock_state, toBoolean(row.lock_state))
-      : toBoolean(row.lock_state),
+    lock_state: lockState,
     last_latitude: latitude,
     last_longitude: longitude,
     speed: hasLiveLocation ? toNumberOrNull(liveLocation.speed) : null,
-    mpu_motion: hasLiveLocation
-      ? toBoolean(liveLocation.mpu_motion, false)
-      : false,
+    mpu_motion: mpuMotion,
+    imu_alert: lockState === true && mpuMotion === true,
+    imu_alert_reason: alertState?.reason || null,
+    imu_alert_at: alertState?.at || null,
+    imu_alert_notified: mapNotified(alertState?.notified),
+    imu_alert_active: alertState?.active === "true",
     last_reported_at:
       (hasLiveLocation && liveLocation.updated_at) ||
       row.created_at ||
@@ -84,8 +123,12 @@ const getBikes = async (req, res) => {
 
     const bikes = await Promise.all(
       rows.map(async (row) => {
-        const liveLocation = await readLiveLocation(row.bike_id);
-        return mapBike(row, liveLocation);
+        const [liveLocation, alertState] = await Promise.all([
+          readLiveLocation(row.bike_id),
+          readAlertState(row.bike_id),
+        ]);
+
+        return mapBike(row, liveLocation, alertState);
       }),
     );
 
@@ -95,6 +138,11 @@ const getBikes = async (req, res) => {
         bikes,
         total: bikes.length,
         generated_at: new Date().toISOString(),
+        geofence: {
+          lat: station.lat,
+          lng: station.lng,
+          radius_m: station.radiusMeter,
+        },
       },
     });
   } catch (error) {

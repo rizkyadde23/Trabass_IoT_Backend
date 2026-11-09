@@ -3,7 +3,8 @@ bicycle-security-backend/
 │   ├── config/
 │   │   ├── db.js                 # Pool koneksi MySQL (mysql2/promise)
 │   │   ├── redis.js              # Redis client connection
-│   │   └── mqtt.js               # Client MQTT (PubSub & Telemetry subscriber)
+│   │   ├── mqtt.js               # Client MQTT (PubSub & Telemetry subscriber)
+│   │   └── station.js            # Koordinat pangkalan, radius geofence & cooldown alert
 │   ├── controllers/
 │   │   ├── authController.js      # Registrasi, login, profil & role user
 │   │   ├── adminController.js     # Data armada untuk dashboard admin
