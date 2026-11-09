@@ -17,8 +17,12 @@ CREATE TABLE IF NOT EXISTS bikes (
 CREATE TABLE IF NOT EXISTS users (
     user_id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
+    email VARCHAR(150) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
     phone_number VARCHAR(20) NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_users_email (email),
+    UNIQUE KEY uq_users_phone_number (phone_number)
 ) ENGINE=InnoDB;
 
 -- 3. Tabel Transaksi Sewa (Rentals)

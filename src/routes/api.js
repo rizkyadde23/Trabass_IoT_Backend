@@ -1,15 +1,31 @@
 const express = require('express');
 const router = express.Router();
 const paymentController = require('../controllers/paymentController');
+const authController = require('../controllers/authController');
+const authMiddleware = require('../middlewares/authMiddleware');
+
+// ---------------------------------------------------------------------------
+// Route publik
+// ---------------------------------------------------------------------------
+router.post('/auth/register', authController.register);
+router.post('/auth/login', authController.login);
 
 // Endpoint Konfigurasi Tarif & Batas Sewa
 router.get('/config/pricing', paymentController.getPaymentConfig);
 
-// Endpoint Membuat Transaksi Sewa & Snap Token
-router.post('/rent/create-transaction', paymentController.createRentTransaction);
-
 // Endpoint Webhook HTTP Notification dari Midtrans
 router.post('/payment/notification', paymentController.handlePaymentNotification);
+
+// ---------------------------------------------------------------------------
+// Route terlindungi (wajib JWT)
+// ---------------------------------------------------------------------------
+router.use(authMiddleware);
+
+// Profil user yang sedang login
+router.get('/auth/me', authController.getMe);
+
+// Endpoint Membuat Transaksi Sewa & Snap Token
+router.post('/rent/create-transaction', paymentController.createRentTransaction);
 
 // Endpoint Extend Transaksi Untuk Menambah Waktu
 router.post('/rent/extend-transaction', paymentController.extendRentTransaction);

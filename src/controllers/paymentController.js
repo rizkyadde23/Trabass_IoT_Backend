@@ -827,13 +827,14 @@ const createRentTransaction = async (req, res) => {
   let reservedBikeId = null;
 
   try {
-    const { bike_id, user_id } = req.body;
+    const { bike_id } = req.body;
+    const userId = req.user.user_id;
     const durationMinutes = parseDurationMinutes(req.body.duration_minutes);
 
-    if (!bike_id || !user_id || !durationMinutes) {
+    if (!bike_id || !durationMinutes) {
       return res.status(400).json({
         status: "error",
-        message: `Parameter bike_id, user_id, dan duration_minutes (${MIN_RENTAL_MINUTES}-${MAX_RENTAL_MINUTES} menit) wajib diisi.`,
+        message: `Parameter bike_id dan duration_minutes (${MIN_RENTAL_MINUTES}-${MAX_RENTAL_MINUTES} menit) wajib diisi.`,
       });
     }
 
@@ -851,7 +852,7 @@ const createRentTransaction = async (req, res) => {
 
     const [users] = await connection.query(
       "SELECT name, phone_number FROM users WHERE user_id = ?",
-      [user_id],
+      [userId],
     );
 
     if (users.length === 0) {
@@ -877,7 +878,7 @@ const createRentTransaction = async (req, res) => {
     );
 
     const otherUserPending = pendingRentals.find(
-      (rental) => Number(rental.user_id) !== Number(user_id),
+      (rental) => Number(rental.user_id) !== Number(userId),
     );
 
     if (otherUserPending) {
@@ -933,7 +934,7 @@ const createRentTransaction = async (req, res) => {
          (bike_id, user_id, duration_minutes, amount, payment_status,
           rental_status, midtrans_order_id, rental_type)
        VALUES (?, ?, ?, ?, 'PENDING', 'WAITING_PAYMENT', ?, 'INITIAL')`,
-      [bike_id, user_id, durationMinutes, amount, orderId],
+      [bike_id, userId, durationMinutes, amount, orderId],
     );
 
     newRentalId = insertResult.insertId;
@@ -1199,13 +1200,14 @@ const extendRentTransaction = async (req, res) => {
   let createdExtensionId = null;
 
   try {
-    const { bike_id, user_id } = req.body;
+    const { bike_id } = req.body;
+    const userId = req.user.user_id;
     const durationMinutes = parseDurationMinutes(req.body.duration_minutes);
 
-    if (!bike_id || !user_id || !durationMinutes) {
+    if (!bike_id || !durationMinutes) {
       return res.status(400).json({
         status: "error",
-        message: `Parameter bike_id, user_id, dan duration_minutes (${MIN_RENTAL_MINUTES}-${MAX_RENTAL_MINUTES} menit) wajib diisi.`,
+        message: `Parameter bike_id dan duration_minutes (${MIN_RENTAL_MINUTES}-${MAX_RENTAL_MINUTES} menit) wajib diisi.`,
       });
     }
 
@@ -1233,7 +1235,7 @@ const extendRentTransaction = async (req, res) => {
          AND rental_status IN ('ACTIVE', 'WARNING_SENT')
        ORDER BY rental_id DESC
        LIMIT 1`,
-      [bike_id, user_id],
+      [bike_id, userId],
     );
 
     if (rentalCandidates.length === 0) {
@@ -1388,12 +1390,13 @@ const finishRentSession = async (req, res) => {
   let pendingExtensionOrders = [];
 
   try {
-    const { bike_id, user_id } = req.body;
+    const { bike_id } = req.body;
+    const userId = req.user.user_id;
 
-    if (!bike_id || !user_id) {
+    if (!bike_id) {
       return res.status(400).json({
         status: "error",
-        message: "Parameter bike_id dan user_id wajib diisi.",
+        message: "Parameter bike_id wajib diisi.",
       });
     }
 
@@ -1411,7 +1414,7 @@ const finishRentSession = async (req, res) => {
          AND rental_status IN ('ACTIVE', 'WARNING_SENT', 'OVERDUE')
        ORDER BY rental_id DESC
        LIMIT 1`,
-      [bike_id, user_id],
+      [bike_id, userId],
     );
 
     if (rentalCandidates.length === 0) {
@@ -1527,7 +1530,7 @@ const finishRentSession = async (req, res) => {
     const state = await getRentalPaymentState(rental.rental_id);
 
     console.log(
-      `[SESSION FINISHED] Sepeda ${bike_id} dikembalikan oleh User ${user_id} & DILOCK.`,
+      `[SESSION FINISHED] Sepeda ${bike_id} dikembalikan oleh User ${userId} & DILOCK.`,
     );
 
     return res.status(200).json({
@@ -1568,11 +1571,14 @@ const confirmRentPayment = async (req, res) => {
     }
 
     const [rentals] = await db.query(
-      "SELECT rental_id FROM rentals WHERE midtrans_order_id = ?",
+      "SELECT rental_id, user_id FROM rentals WHERE midtrans_order_id = ?",
       [order_id],
     );
 
-    if (rentals.length === 0) {
+    if (
+      rentals.length === 0 ||
+      Number(rentals[0].user_id) !== Number(req.user.user_id)
+    ) {
       return res.status(404).json({
         status: "error",
         message: "Data rental tidak ditemukan.",
@@ -1719,11 +1725,14 @@ const getRentStatus = async (req, res) => {
     const { order_id } = req.params;
 
     const [rentals] = await db.query(
-      "SELECT rental_id FROM rentals WHERE midtrans_order_id = ?",
+      "SELECT rental_id, user_id FROM rentals WHERE midtrans_order_id = ?",
       [order_id],
     );
 
-    if (rentals.length === 0) {
+    if (
+      rentals.length === 0 ||
+      Number(rentals[0].user_id) !== Number(req.user.user_id)
+    ) {
       return res.status(404).json({
         status: "error",
         message: "Data rental tidak ditemukan.",
