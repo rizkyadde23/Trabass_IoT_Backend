@@ -1742,6 +1742,23 @@ const getRentStatus = async (req, res) => {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Endpoint: Konfigurasi tarif & batas sewa (dipakai frontend)
+// GET /api/config/pricing
+// ---------------------------------------------------------------------------
+const getPaymentConfig = async (req, res) => {
+  return res.status(200).json({
+    status: "success",
+    data: {
+      initial_price_per_minute: INITIAL_PRICE_PER_MINUTE,
+      extension_price_per_minute: EXTENSION_PRICE_PER_MINUTE,
+      min_rental_minutes: MIN_RENTAL_MINUTES,
+      max_rental_minutes: MAX_RENTAL_MINUTES,
+      payment_expiry_minutes: PAYMENT_EXPIRY_MINUTES,
+    },
+  });
+};
+
 module.exports = {
   createRentTransaction,
   handlePaymentNotification,
@@ -1749,4 +1766,5 @@ module.exports = {
   finishRentSession,
   confirmRentPayment,
   getRentStatus,
+  getPaymentConfig,
 };

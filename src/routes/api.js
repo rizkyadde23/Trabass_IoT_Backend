@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const paymentController = require('../controllers/paymentController');
 
+// Endpoint Konfigurasi Tarif & Batas Sewa
+router.get('/config/pricing', paymentController.getPaymentConfig);
+
 // Endpoint Membuat Transaksi Sewa & Snap Token
 router.post('/rent/create-transaction', paymentController.createRentTransaction);
 
