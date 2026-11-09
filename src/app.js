@@ -7,6 +7,7 @@ const redisClient = require('./config/redis');
 const mqttClient = require('./config/mqtt');
 const telemetryController = require('./controllers/telemetryController');
 const { initTimerService } = require('./services/timerService');
+const settingsService = require('./services/settingsService');
 const apiRoutes = require('./routes/api'); // <--- Import Routes API
 
 const app = express();
@@ -47,7 +48,12 @@ app.get('/health', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`[SERVER] Running on http://localhost:${PORT}`);
-  initTimerService();
+
+// Muat pengaturan tersimpan sebelum server menerima request agar pangkalan,
+// radius geofence, dan pricing langsung memakai nilai terbaru.
+settingsService.init().finally(() => {
+  app.listen(PORT, () => {
+    console.log(`[SERVER] Running on http://localhost:${PORT}`);
+    initTimerService();
+  });
 });

@@ -1,6 +1,7 @@
 const db = require("../config/db");
 const redisClient = require("../config/redis");
 const station = require("../config/station");
+const { isOutsideGeofence } = require("../services/geofenceService");
 
 const toNumberOrNull = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -86,10 +87,35 @@ const mapBike = (row, liveLocation, alertState) => {
     ? toBoolean(liveLocation.mpu_motion, false)
     : false;
 
+  // Deteksi geofence dihitung ulang saat data dibaca agar dashboard tetap
+  // benar walau status di MySQL belum sempat diperbarui oleh telemetri
+  // (misalnya paket terakhir diproses sebelum engine geofence aktif).
+  const hasCoordinates = latitude !== null && longitude !== null;
+  const geofenceCheck = hasCoordinates
+    ? isOutsideGeofence(
+        latitude,
+        longitude,
+        station.lat,
+        station.lng,
+        station.radiusMeter,
+      )
+    : { isViolated: false, distanceMeter: null };
+
+  const storedStatus = row.status;
+  const geofenceViolated = Boolean(hasCoordinates && geofenceCheck.isViolated);
+  const effectiveStatus =
+    geofenceViolated && storedStatus !== "TAMPER_ALERT"
+      ? "GEOFENCE_VIOLATION"
+      : storedStatus;
+
   return {
     bike_id: row.bike_id,
     name: row.name,
-    status: row.status,
+    status: effectiveStatus,
+    stored_status: storedStatus,
+    geofence_violated: geofenceViolated,
+    geofence_distance_m: geofenceCheck.distanceMeter,
+    geofence_radius_m: station.radiusMeter,
     lock_state: lockState,
     last_latitude: latitude,
     last_longitude: longitude,

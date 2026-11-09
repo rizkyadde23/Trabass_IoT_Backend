@@ -69,7 +69,16 @@ CREATE TABLE IF NOT EXISTS telemetry_logs (
     FOREIGN KEY (bike_id) REFERENCES bikes(bike_id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
--- 5. Seed Data Sepeda Pertama
+-- 5. Pengaturan Aplikasi (key-value)
+-- Nilai di sini dibaca saat startup dan diperbarui dari halaman Pengaturan
+-- admin tanpa perlu restart backend.
+CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key VARCHAR(64) PRIMARY KEY,
+    setting_value VARCHAR(255) NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+
+-- 6. Seed Data Sepeda Pertama
 INSERT INTO bikes (bike_id, name, status, lock_state, last_latitude, last_longitude)
 VALUES ('BK-001', 'Sepeda Rental Kampus 01', 'AVAILABLE', TRUE, -7.77351200, 110.38541100)
 ON DUPLICATE KEY UPDATE name=VALUES(name);

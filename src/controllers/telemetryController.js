@@ -201,21 +201,38 @@ const handleTelemetry = async (topic, message) => {
     const nowIso = now.toISOString();
 
     // 1. Simpan/update cache real-time di Redis.
-    await redisClient.hSet(buildLocationKey(bikeId), {
-      lat: String(lat),
-      lng: String(lng),
-      speed: String(speed),
-      lock_state: String(lockState),
-      mpu_motion: String(mpuMotion),
-      updated_at: nowIso,
-    });
+    //    Kegagalan Redis tidak boleh menghentikan engine keamanan & update MySQL.
+    try {
+      if (redisClient.isReady) {
+        await redisClient.hSet(buildLocationKey(bikeId), {
+          lat: String(lat),
+          lng: String(lng),
+          speed: String(speed),
+          lock_state: String(lockState),
+          mpu_motion: String(mpuMotion),
+          updated_at: nowIso,
+        });
+      }
+    } catch (cacheError) {
+      console.warn(
+        `[TELEMETRY CACHE] Gagal menyimpan lokasi ${bikeId}:`,
+        cacheError.message,
+      );
+    }
 
     // 2. Catat log ke database MySQL.
-    await db.query(
-      `INSERT INTO telemetry_logs (bike_id, latitude, longitude, speed, mpu_motion, lock_state)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [bikeId, lat, lng, speed, mpuMotion, lockState],
-    );
+    try {
+      await db.query(
+        `INSERT INTO telemetry_logs (bike_id, latitude, longitude, speed, mpu_motion, lock_state)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [bikeId, lat, lng, speed, mpuMotion, lockState],
+      );
+    } catch (logError) {
+      console.warn(
+        `[TELEMETRY LOG] Gagal mencatat log ${bikeId}:`,
+        logError.message,
+      );
+    }
 
     // 3. Security engine.
     const alertState = await readAlertCache(bikeId);

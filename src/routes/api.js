@@ -3,6 +3,7 @@ const router = express.Router();
 const paymentController = require('../controllers/paymentController');
 const authController = require('../controllers/authController');
 const adminController = require('../controllers/adminController');
+const settingsController = require('../controllers/settingsController');
 const authMiddleware = require('../middlewares/authMiddleware');
 const adminMiddleware = require('../middlewares/adminMiddleware');
 
@@ -28,6 +29,10 @@ router.get('/auth/me', authController.getMe);
 
 // Dashboard admin: daftar seluruh armada
 router.get('/admin/bikes', adminMiddleware, adminController.getBikes);
+
+// Pengaturan admin: pangkalan, radius geofence, dan pricing
+router.get('/admin/settings', adminMiddleware, settingsController.getSettings);
+router.put('/admin/settings', adminMiddleware, settingsController.updateSettings);
 
 // Endpoint Membuat Transaksi Sewa & Snap Token
 router.post('/rent/create-transaction', paymentController.createRentTransaction);

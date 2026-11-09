@@ -7,9 +7,10 @@ const toFiniteNumber = (value, fallback) => {
 
 /**
  * Satu sumber konfigurasi pangkalan untuk engine geofence dan dashboard.
- * Frontend menerima nilai yang sama lewat GET /api/admin/bikes.
+ * Objek ini tidak di-freeze karena halaman Pengaturan admin dapat
+ * memperbarui nilainya saat runtime lewat settingsService.
  */
-const station = Object.freeze({
+const station = {
   lat: toFiniteNumber(process.env.STATION_LAT, -7.773512),
   lng: toFiniteNumber(process.env.STATION_LNG, 110.385411),
   radiusMeter: toFiniteNumber(process.env.GEOFENCE_RADIUS_M, 500),
@@ -21,6 +22,6 @@ const station = Object.freeze({
     process.env.TAMPER_ALERT_RESET_SECONDS,
     120,
   ),
-});
+};
 
 module.exports = station;

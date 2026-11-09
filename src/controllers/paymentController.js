@@ -21,18 +21,11 @@ const snap = new midtransClient.Snap({
 
 // ---------------------------------------------------------------------------
 // Konfigurasi pembayaran
+// Objek pricing bersifat mutable dan dapat diperbarui dari halaman
+// Pengaturan admin, sehingga nilainya dibaca saat request (bukan saat modul
+// di-load) agar perubahan langsung berlaku tanpa restart backend.
 // ---------------------------------------------------------------------------
-const INITIAL_PRICE_PER_MINUTE = Number(
-  process.env.RENTAL_PRICE_PER_MINUTE || 1000,
-);
-const EXTENSION_PRICE_PER_MINUTE = Number(
-  process.env.EXTENSION_PRICE_PER_MINUTE || INITIAL_PRICE_PER_MINUTE,
-);
-const MIN_RENTAL_MINUTES = Number(process.env.MIN_RENTAL_MINUTES || 15);
-const MAX_RENTAL_MINUTES = Number(process.env.MAX_RENTAL_MINUTES || 1440);
-const PAYMENT_EXPIRY_MINUTES = Number(
-  process.env.PAYMENT_EXPIRY_MINUTES || 15,
-);
+const pricing = require("../config/pricing");
 
 // ---------------------------------------------------------------------------
 // Helper umum
@@ -41,8 +34,8 @@ const parseDurationMinutes = (value) => {
   const duration = Number(value);
   if (
     !Number.isInteger(duration) ||
-    duration < MIN_RENTAL_MINUTES ||
-    duration > MAX_RENTAL_MINUTES
+    duration < pricing.minRentalMinutes ||
+    duration > pricing.maxRentalMinutes
   ) {
     return null;
   }
@@ -52,8 +45,8 @@ const parseDurationMinutes = (value) => {
 const calculateAmount = (durationMinutes, type = "INITIAL") => {
   const rate =
     type === "EXTENSION"
-      ? EXTENSION_PRICE_PER_MINUTE
-      : INITIAL_PRICE_PER_MINUTE;
+      ? pricing.extensionPricePerMinute
+      : pricing.initialPricePerMinute;
   return Math.round(durationMinutes * rate);
 };
 
@@ -834,7 +827,7 @@ const createRentTransaction = async (req, res) => {
     if (!bike_id || !durationMinutes) {
       return res.status(400).json({
         status: "error",
-        message: `Parameter bike_id dan duration_minutes (${MIN_RENTAL_MINUTES}-${MAX_RENTAL_MINUTES} menit) wajib diisi.`,
+        message: `Parameter bike_id dan duration_minutes (${pricing.minRentalMinutes}-${pricing.maxRentalMinutes} menit) wajib diisi.`,
       });
     }
 
@@ -976,7 +969,7 @@ const createRentTransaction = async (req, res) => {
         ],
         expiry: {
           unit: "minutes",
-          duration: PAYMENT_EXPIRY_MINUTES,
+          duration: pricing.paymentExpiryMinutes,
         },
       });
     } catch (midtransError) {
@@ -999,7 +992,7 @@ const createRentTransaction = async (req, res) => {
         amount,
         payment_status: "PENDING",
         rental_status: "WAITING_PAYMENT",
-        expires_in_minutes: PAYMENT_EXPIRY_MINUTES,
+        expires_in_minutes: pricing.paymentExpiryMinutes,
       },
     });
   } catch (error) {
@@ -1207,7 +1200,7 @@ const extendRentTransaction = async (req, res) => {
     if (!bike_id || !durationMinutes) {
       return res.status(400).json({
         status: "error",
-        message: `Parameter bike_id dan duration_minutes (${MIN_RENTAL_MINUTES}-${MAX_RENTAL_MINUTES} menit) wajib diisi.`,
+        message: `Parameter bike_id dan duration_minutes (${pricing.minRentalMinutes}-${pricing.maxRentalMinutes} menit) wajib diisi.`,
       });
     }
 
@@ -1334,7 +1327,7 @@ const extendRentTransaction = async (req, res) => {
         ],
         expiry: {
           unit: "minutes",
-          duration: PAYMENT_EXPIRY_MINUTES,
+          duration: pricing.paymentExpiryMinutes,
         },
       });
     } catch (midtransError) {
@@ -1358,7 +1351,7 @@ const extendRentTransaction = async (req, res) => {
         parent_rental_id: parentRental.rental_id,
         payment_status: "PENDING",
         rental_status: "WAITING_EXTEND",
-        expires_in_minutes: PAYMENT_EXPIRY_MINUTES,
+        expires_in_minutes: pricing.paymentExpiryMinutes,
       },
     });
   } catch (error) {
@@ -1759,11 +1752,11 @@ const getPaymentConfig = async (req, res) => {
   return res.status(200).json({
     status: "success",
     data: {
-      initial_price_per_minute: INITIAL_PRICE_PER_MINUTE,
-      extension_price_per_minute: EXTENSION_PRICE_PER_MINUTE,
-      min_rental_minutes: MIN_RENTAL_MINUTES,
-      max_rental_minutes: MAX_RENTAL_MINUTES,
-      payment_expiry_minutes: PAYMENT_EXPIRY_MINUTES,
+      initial_price_per_minute: pricing.initialPricePerMinute,
+      extension_price_per_minute: pricing.extensionPricePerMinute,
+      min_rental_minutes: pricing.minRentalMinutes,
+      max_rental_minutes: pricing.maxRentalMinutes,
+      payment_expiry_minutes: pricing.paymentExpiryMinutes,
     },
   });
 };
