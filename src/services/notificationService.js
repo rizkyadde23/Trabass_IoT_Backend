@@ -186,6 +186,47 @@ Sistem telah membunyikan alarm sirene secara otomatis pada sepeda.`;
 };
 
 /**
+ * Template Notifikasi Pelanggaran lengkap ke Admin.
+ * Dikirim setiap kali Perception Layer mendeteksi pelanggaran
+ * (geofence, tamper, sewa habis, atau sewa habis tapi sepeda masih
+ * digunakan). Memuat ID Sepeda, Nama Penyewa, Jenis Pelanggaran,
+ * Waktu Kejadian, dan tautan Halaman Insiden.
+ */
+const sendIncidentNotification = async (adminPhone, incident = {}) => {
+  const base = String(process.env.FRONTEND_BASE_URL || "").replace(
+    /\/+$/,
+    "",
+  );
+  const incidentUrl = `${base}/admin/incidents`;
+
+  const renterText = incident.userName
+    ? `${incident.userName}${incident.userPhone ? ` (${incident.userPhone})` : ""}`
+    : "Tidak ada penyewa aktif";
+
+  const locationText =
+    incident.latitude !== null &&
+    incident.latitude !== undefined &&
+    incident.longitude !== null &&
+    incident.longitude !== undefined
+      ? `${Number(incident.latitude).toFixed(5)}, ${Number(incident.longitude).toFixed(5)}`
+      : "-";
+
+  const text = `🚨 *PELANGGARAN TERDETEKSI* 🚨
+
+• ID Sepeda: *${incident.bikeId || "-"}*
+• Penyewa: *${renterText}*
+• Jenis Pelanggaran: *${incident.typeLabel || "TIDAK DIKETAHUI"}*
+• Detail: ${incident.message || "-"}
+• Waktu Kejadian: *${formatDateTime(incident.detectedAt || new Date())}*
+• Lokasi: ${locationText}
+
+Buka dashboard untuk melihat detail & tindak lanjut:
+${incidentUrl}`;
+
+  return await sendWhatsApp(adminPhone, text, incident.bikeId);
+};
+
+/**
  * Template Peringatan Konflik Pembayaran
  * Dipakai ketika pembayaran sudah diterima Midtrans, tetapi sesi tidak dapat diaktifkan.
  */
@@ -220,5 +261,6 @@ module.exports = {
   sendTimeWarning,
   sendRentalExpired,
   sendSecurityAlert,
+  sendIncidentNotification,
   sendPaymentConflictAlert,
 };

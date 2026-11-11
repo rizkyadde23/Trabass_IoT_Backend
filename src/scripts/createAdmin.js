@@ -5,8 +5,10 @@ require("dotenv").config();
 const BCRYPT_ROUNDS = 10;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_REGEX = /^08\d{8,13}$/;
+const USERNAME_REGEX = /^[a-z0-9._-]{3,50}$/;
 
 const normalizeEmail = (value) => String(value || "").trim().toLowerCase();
+const normalizeUsername = (value) => String(value || "").trim().toLowerCase();
 const normalizePhoneNumber = (value) => {
   let phone = String(value || "").replace(/[\s\-().]/g, "");
 
@@ -27,12 +29,20 @@ const fail = (message) => {
 
 const main = async () => {
   const name = String(process.env.ADMIN_NAME || "").trim();
+  const username = normalizeUsername(process.env.ADMIN_USERNAME);
   const email = normalizeEmail(process.env.ADMIN_EMAIL);
   const password = String(process.env.ADMIN_PASSWORD || "");
   const phoneNumber = normalizePhoneNumber(process.env.ADMIN_PHONE_NUMBER);
 
   if (name.length < 2) {
     fail("ADMIN_NAME wajib diisi minimal 2 karakter.");
+  }
+
+  // Username opsional, tetapi wajib valid jika diisi.
+  if (username && !USERNAME_REGEX.test(username)) {
+    fail(
+      "ADMIN_USERNAME tidak valid. Gunakan 3-50 karakter huruf kecil, angka, titik, garis bawah, atau tanda hubung.",
+    );
   }
 
   if (!EMAIL_REGEX.test(email)) {
@@ -59,14 +69,17 @@ const main = async () => {
 
     await db.query(
       `UPDATE users
-       SET name = ?, password_hash = ?, role = 'admin'
+       SET name = ?, username = COALESCE(?, username), password_hash = ?, role = 'admin'
        WHERE user_id = ?`,
-      [name, passwordHash, userId],
+      [name, username || null, passwordHash, userId],
     );
 
     console.log(
       `[ADMIN] Akun ${email} (user_id: ${userId}) berhasil dipromosikan menjadi admin.`,
     );
+    if (username) {
+      console.log(`[ADMIN] Username login: ${username}`);
+    }
     console.log(
       "[ADMIN] Password direset sesuai ADMIN_PASSWORD. Login ulang di frontend.",
     );
@@ -97,9 +110,9 @@ const main = async () => {
 
     await db.query(
       `UPDATE users
-       SET name = ?, email = ?, password_hash = ?, role = 'admin'
+       SET name = ?, username = ?, email = ?, password_hash = ?, role = 'admin'
        WHERE user_id = ?`,
-      [name, email, passwordHash, existingUser.user_id],
+      [name, username || null, email, passwordHash, existingUser.user_id],
     );
 
     console.log(
@@ -112,14 +125,17 @@ const main = async () => {
   }
 
   const [insertResult] = await db.query(
-    `INSERT INTO users (name, email, password_hash, phone_number, role)
-     VALUES (?, ?, ?, ?, 'admin')`,
-    [name, email, passwordHash, phoneNumber],
+    `INSERT INTO users (name, username, email, password_hash, phone_number, role)
+     VALUES (?, ?, ?, ?, ?, 'admin')`,
+    [name, username || null, email, passwordHash, phoneNumber],
   );
 
   console.log(
     `[ADMIN] Akun admin baru ${email} berhasil dibuat (user_id: ${insertResult.insertId}).`,
   );
+  if (username) {
+    console.log(`[ADMIN] Username login: ${username}`);
+  }
 };
 
 main()

@@ -8,21 +8,27 @@ CREATE TABLE IF NOT EXISTS bikes (
     -- AVAILABLE, RESERVED, RENTED, OVERDUE, MAINTENANCE, GEOFENCE_VIOLATION, TAMPER_ALERT
     status VARCHAR(20) DEFAULT 'AVAILABLE',
     lock_state BOOLEAN DEFAULT TRUE,
+    -- Persentase baterai (0-100) dari perception layer ESP32
+    battery_percent DECIMAL(5, 2) NULL,
     last_latitude DECIMAL(10, 8),
     last_longitude DECIMAL(11, 8),
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
 -- 2. Tabel User / Penyewa
+-- Penyewa baru (alur scan QR) identitasnya Nomor WA: email, username, dan
+-- password_hash boleh NULL. Admin wajib punya username/email + password.
 CREATE TABLE IF NOT EXISTS users (
     user_id INT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
-    email VARCHAR(150) NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    username VARCHAR(50) NULL,
+    email VARCHAR(150) NULL,
+    password_hash VARCHAR(255) NULL,
     -- user: penyewa PWA, admin: pengelola dashboard monitoring
     role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
     phone_number VARCHAR(20) NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_users_username (username),
     UNIQUE KEY uq_users_email (email),
     UNIQUE KEY uq_users_phone_number (phone_number)
 ) ENGINE=InnoDB;
@@ -78,13 +84,17 @@ CREATE TABLE IF NOT EXISTS app_settings (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- 6. Insiden Keamanan (riwayat tamper & pelanggaran geofence)
+-- 6. Insiden Keamanan (tamper, geofence, dan pelanggaran sewa)
 -- Satu baris mewakili satu kejadian. Baris ACTIVE diperbarui saat
 -- telemetri berikutnya masih mendeteksi kondisi yang sama.
+-- user_id & rental_id mencatat penyewa yang aktif saat kejadian.
 CREATE TABLE IF NOT EXISTS security_incidents (
     incident_id BIGINT AUTO_INCREMENT PRIMARY KEY,
     bike_id VARCHAR(20) NOT NULL,
-    -- TAMPER (guncangan MPU6050) atau GEOFENCE (keluar radius pangkalan)
+    user_id INT NULL,
+    rental_id INT NULL,
+    -- TAMPER (guncangan MPU6050), GEOFENCE (keluar radius pangkalan),
+    -- OVERDUE (waktu sewa habis), OVERDUE_MOVEMENT (sewa habis tapi sepeda masih bergerak)
     incident_type VARCHAR(32) NOT NULL,
     -- CRITICAL untuk tamper, HIGH untuk geofence
     severity VARCHAR(16) NOT NULL DEFAULT 'HIGH',
@@ -103,11 +113,14 @@ CREATE TABLE IF NOT EXISTS security_incidents (
     resolved_by INT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (bike_id) REFERENCES bikes(bike_id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL,
+    FOREIGN KEY (rental_id) REFERENCES rentals(rental_id) ON DELETE SET NULL,
     FOREIGN KEY (resolved_by) REFERENCES users(user_id) ON DELETE SET NULL,
     INDEX idx_incidents_detected (detected_at),
     INDEX idx_incidents_status (status, detected_at),
     INDEX idx_incidents_bike (bike_id, detected_at),
-    INDEX idx_incidents_type (incident_type, detected_at)
+    INDEX idx_incidents_type (incident_type, detected_at),
+    INDEX idx_incidents_user (user_id)
 ) ENGINE=InnoDB;
 
 -- 7. Audit Perintah Admin (force lock/unlock, matikan alarm)

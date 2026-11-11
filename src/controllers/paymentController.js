@@ -11,6 +11,7 @@ const {
   sendReturnReceipt,
   sendPaymentConflictAlert,
 } = require("../services/notificationService");
+const incidentService = require("../services/incidentService");
 
 // Inisialisasi Midtrans Snap Instance
 const snap = new midtransClient.Snap({
@@ -659,6 +660,21 @@ const processSuccessfulPayment = async (rentalId) => {
         : await activateInitialRental(connection, rental);
 
     await connection.commit();
+
+    // Perpanjangan diterima: sewa kembali ACTIVE dengan batas waktu baru,
+    // jadi insiden pelanggaran sewa (OVERDUE / OVERDUE_MOVEMENT) ditutup.
+    // Best-effort: kegagalan tidak boleh menggagalkan aktivasi pembayaran.
+    if (result.rentalType === "EXTENSION" && result.bikeId) {
+      try {
+        await incidentService.resolveRentalIncidents(result.bikeId);
+      } catch (incidentError) {
+        console.warn(
+          `[INCIDENT] Gagal menutup insiden sewa ${result.bikeId}:`,
+          incidentError.message,
+        );
+      }
+    }
+
     return result;
   } catch (error) {
     try {
@@ -1496,6 +1512,17 @@ const finishRentSession = async (req, res) => {
     );
 
     await connection.commit();
+
+    // Sesi diakhiri: tutup insiden pelanggaran sewa (OVERDUE /
+    // OVERDUE_MOVEMENT). Best-effort agar tidak menggagalkan response.
+    try {
+      await incidentService.resolveRentalIncidents(bike_id);
+    } catch (incidentError) {
+      console.warn(
+        `[INCIDENT] Gagal menutup insiden sewa ${bike_id}:`,
+        incidentError.message,
+      );
+    }
 
     // Best-effort: batalkan order perpanjangan yang masih pending.
     for (const extension of pendingExtensionOrders) {

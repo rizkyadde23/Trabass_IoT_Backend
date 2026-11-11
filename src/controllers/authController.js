@@ -6,6 +6,7 @@ require("dotenv").config();
 const BCRYPT_ROUNDS = 10;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_REGEX = /^08\d{8,13}$/;
+const USERNAME_REGEX = /^[a-z0-9._-]{3,50}$/;
 
 /**
  * jsonwebtoken hanya menerima angka (detik) atau timespan seperti "7d".
@@ -34,6 +35,9 @@ const JWT_EXPIRES_IN = resolveJwtExpiresIn(process.env.JWT_EXPIRES_IN);
 
 const normalizeEmail = (value) => String(value || "").trim().toLowerCase();
 
+const normalizeIdentifier = (value) =>
+  String(value || "").trim().toLowerCase();
+
 /**
  * Menyeragamkan nomor WA ke format lokal 08xxxxxxxxxx agar unique index
  * tidak bisa dilewati lewat variasi +62 / 62 / spasi / tanda hubung.
@@ -52,10 +56,15 @@ const normalizePhoneNumber = (value) => {
   return phone;
 };
 
+/**
+ * Penyewa hasil alur scan QR tidak memiliki email/username/password,
+ * sehingga kolom tersebut boleh NULL pada data user.
+ */
 const sanitizeUser = (user) => ({
   user_id: user.user_id,
   name: user.name,
-  email: user.email,
+  username: user.username || null,
+  email: user.email || null,
   role: user.role || "user",
   phone_number: user.phone_number,
   created_at: user.created_at,
@@ -65,116 +74,111 @@ const createToken = (user) =>
   jwt.sign(
     {
       user_id: user.user_id,
-      email: user.email,
+      email: user.email || undefined,
+      username: user.username || undefined,
       role: user.role || "user",
     },
     process.env.JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN },
   );
 
-const validateRegistration = ({ name, email, phoneNumber, password }) => {
-  if (!name || name.length < 2 || name.length > 100) {
-    return "Nama wajib diisi (2-100 karakter).";
-  }
-
-  if (!email || email.length > 150 || !EMAIL_REGEX.test(email)) {
-    return "Format email tidak valid.";
-  }
-
-  if (!PHONE_REGEX.test(phoneNumber)) {
-    return "Nomor WA tidak valid. Gunakan format 08xxxxxxxxxx.";
-  }
-
-  if (!password || password.length < 8) {
-    return "Password minimal 8 karakter.";
-  }
-
-  if (password.length > 72) {
-    return "Password maksimal 72 karakter.";
-  }
-
-  return null;
-};
-
 // ---------------------------------------------------------------------------
-// Endpoint: Registrasi user baru
-// POST /api/auth/register
+// Endpoint: Registrasi ringan penyewa (hasil scan QR sepeda)
+// POST /api/auth/quick-register
+// Identitas penyewa adalah Nomor WA. Tanpa email & password: user scan QR,
+// mengisi nama + nomor WA, lalu langsung diarahkan ke halaman pembayaran.
 // ---------------------------------------------------------------------------
-const register = async (req, res) => {
+const quickRegister = async (req, res) => {
   try {
     const name = String(req.body?.name || "").trim();
-    const email = normalizeEmail(req.body?.email);
     const phoneNumber = normalizePhoneNumber(req.body?.phone_number);
+    const bikeId = String(req.body?.bike_id || "")
+      .trim()
+      .toUpperCase();
     const password = String(req.body?.password || "");
 
-    const validationError = validateRegistration({
-      name,
-      email,
-      phoneNumber,
-      password,
-    });
-
-    if (validationError) {
+    if (!bikeId) {
       return res.status(400).json({
         status: "error",
-        message: validationError,
+        message: "ID sepeda wajib diisi. Silakan scan ulang QR code sepeda.",
       });
     }
 
-    const [emailRows] = await db.query(
-      "SELECT user_id FROM users WHERE email = ? LIMIT 1",
-      [email],
+    if (!name || name.length < 2 || name.length > 100) {
+      return res.status(400).json({
+        status: "error",
+        message: "Nama wajib diisi (2-100 karakter).",
+      });
+    }
+
+    if (!PHONE_REGEX.test(phoneNumber)) {
+      return res.status(400).json({
+        status: "error",
+        message: "Nomor WA tidak valid. Gunakan format 08xxxxxxxxxx.",
+      });
+    }
+
+    if (password) {
+      return res.status(400).json({
+        status: "error",
+        message:
+          "Registrasi penyewa hanya menggunakan nama dan nomor WA. " +
+          "Akun dengan password hanya dibuat lewat admin.",
+      });
+    }
+
+    const [bikeRows] = await db.query(
+      "SELECT bike_id FROM bikes WHERE bike_id = ? LIMIT 1",
+      [bikeId],
     );
 
-    if (emailRows.length > 0) {
-      return res.status(409).json({
+    if (bikeRows.length === 0) {
+      return res.status(404).json({
         status: "error",
-        message: "Email sudah terdaftar. Silakan login.",
+        message: `Sepeda ${bikeId} tidak terdaftar. Silakan scan ulang QR code.`,
       });
     }
 
     const [phoneRows] = await db.query(
-      `SELECT user_id, email, password_hash
+      `SELECT user_id, role, email, password_hash
        FROM users
        WHERE phone_number = ?
        LIMIT 1`,
       [phoneNumber],
     );
 
-    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     let userId;
 
     if (phoneRows.length > 0) {
       const existingUser = phoneRows[0];
 
-      // Nomor sudah terdaftar penuh (punya email/password) -> tolak.
-      if (existingUser.email || existingUser.password_hash) {
-        return res.status(409).json({
+      // Nomor milik admin tidak boleh diklaim sebagai akun penyewa.
+      if (existingUser.role === "admin") {
+        return res.status(403).json({
           status: "error",
-          message: "Nomor WA sudah terdaftar. Silakan login.",
+          message:
+            "Nomor WA ini terdaftar sebagai admin. Gunakan nomor pribadi untuk menyewa.",
         });
       }
 
-      // User lama tanpa kredensial: klaim baris agar user_id & riwayat
-      // rentals tetap terjaga.
-      await db.query(
-        `UPDATE users
-         SET name = ?, email = ?, password_hash = ?
-         WHERE user_id = ?`,
-        [name, email, passwordHash, existingUser.user_id],
-      );
+      // Nomor sudah dikenal: lanjutkan sesi dengan memperbarui nama.
+      // Nomor WA adalah identitas penyewa pada alur scan QR.
+      await db.query("UPDATE users SET name = ? WHERE user_id = ?", [
+        name,
+        existingUser.user_id,
+      ]);
       userId = existingUser.user_id;
     } else {
       const [insertResult] = await db.query(
-        `INSERT INTO users (name, email, password_hash, phone_number)
-         VALUES (?, ?, ?, ?)`,
-        [name, email, passwordHash, phoneNumber],
+        `INSERT INTO users (name, email, password_hash, phone_number, role)
+         VALUES (?, NULL, NULL, ?, 'user')`,
+        [name, phoneNumber],
       );
       userId = insertResult.insertId;
     }
 
     const [rows] = await db.query(
-      `SELECT user_id, name, email, phone_number, role, created_at
+      `SELECT user_id, name, username, email, phone_number, role, created_at
        FROM users
        WHERE user_id = ?`,
       [userId],
@@ -188,17 +192,18 @@ const register = async (req, res) => {
       data: {
         token: createToken(user),
         user,
+        bike_id: bikeId,
       },
     });
   } catch (error) {
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
         status: "error",
-        message: "Email atau nomor WA sudah terdaftar. Silakan login.",
+        message: "Nomor WA sudah terdaftar. Coba lagi atau gunakan nomor lain.",
       });
     }
 
-    console.error("[AUTH REGISTER ERROR]", error.message);
+    console.error("[AUTH QUICK REGISTER ERROR]", error.message);
     return res.status(500).json({
       status: "error",
       message: "Gagal memproses registrasi. Silakan coba lagi.",
@@ -207,33 +212,37 @@ const register = async (req, res) => {
 };
 
 // ---------------------------------------------------------------------------
-// Endpoint: Login dengan email & password
+// Endpoint: Login admin dengan username ATAU email + password
 // POST /api/auth/login
 // ---------------------------------------------------------------------------
 const login = async (req, res) => {
   try {
-    const email = normalizeEmail(req.body?.email);
+    // Field `identifier` menerima username atau email. Field `email`
+    // tetap diterima untuk kompatibilitas klien lama.
+    const identifier = normalizeIdentifier(
+      req.body?.identifier || req.body?.email,
+    );
     const password = String(req.body?.password || "");
 
-    if (!email || !password) {
+    if (!identifier || !password) {
       return res.status(400).json({
         status: "error",
-        message: "Email dan password wajib diisi.",
+        message: "Username/email dan password wajib diisi.",
       });
     }
 
     const [rows] = await db.query(
-      `SELECT user_id, name, email, password_hash, phone_number, role, created_at
+      `SELECT user_id, name, username, email, password_hash, phone_number, role, created_at
        FROM users
-       WHERE email = ?
+       WHERE email = ? OR username = ?
        LIMIT 1`,
-      [email],
+      [identifier, identifier],
     );
 
     if (rows.length === 0 || !rows[0].password_hash) {
       return res.status(401).json({
         status: "error",
-        message: "Email atau password salah.",
+        message: "Username/email atau password salah.",
       });
     }
 
@@ -243,7 +252,7 @@ const login = async (req, res) => {
     if (!isPasswordValid) {
       return res.status(401).json({
         status: "error",
-        message: "Email atau password salah.",
+        message: "Username/email atau password salah.",
       });
     }
 
@@ -273,7 +282,7 @@ const login = async (req, res) => {
 const getMe = async (req, res) => {
   try {
     const [rows] = await db.query(
-      `SELECT user_id, name, email, phone_number, role, created_at
+      `SELECT user_id, name, username, email, phone_number, role, created_at
        FROM users
        WHERE user_id = ?`,
       [req.user.user_id],
@@ -300,8 +309,10 @@ const getMe = async (req, res) => {
 };
 
 module.exports = {
-  register,
+  quickRegister,
   login,
   getMe,
   normalizePhoneNumber,
+  normalizeIdentifier,
+  USERNAME_REGEX,
 };

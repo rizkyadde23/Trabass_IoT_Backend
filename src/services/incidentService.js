@@ -3,8 +3,19 @@ const db = require("../config/db");
 /**
  * Insiden keamanan disimpan di MySQL agar riwayat tetap ada walaupun
  * cache Redis dibersihkan atau backend di-restart.
+ *
+ * Jenis insiden:
+ * - TAMPER           : guncangan MPU6050 saat sepeda terkunci.
+ * - GEOFENCE         : sepeda keluar radius aman pangkalan.
+ * - OVERDUE          : waktu sewa habis (sepeda dikunci otomatis).
+ * - OVERDUE_MOVEMENT : waktu sewa habis tetapi sepeda masih bergerak.
  */
-const VALID_TYPES = new Set(["TAMPER", "GEOFENCE"]);
+const VALID_TYPES = new Set([
+  "TAMPER",
+  "GEOFENCE",
+  "OVERDUE",
+  "OVERDUE_MOVEMENT",
+]);
 const VALID_STATUSES = new Set(["ACTIVE", "RESOLVED"]);
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
@@ -36,6 +47,8 @@ const ensureTable = async () => {
     `CREATE TABLE IF NOT EXISTS security_incidents (
       incident_id BIGINT AUTO_INCREMENT PRIMARY KEY,
       bike_id VARCHAR(20) NOT NULL,
+      user_id INT NULL,
+      rental_id INT NULL,
       incident_type VARCHAR(32) NOT NULL,
       severity VARCHAR(16) NOT NULL DEFAULT 'HIGH',
       status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
@@ -52,13 +65,53 @@ const ensureTable = async () => {
       resolved_by INT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (bike_id) REFERENCES bikes(bike_id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL,
+      FOREIGN KEY (rental_id) REFERENCES rentals(rental_id) ON DELETE SET NULL,
       FOREIGN KEY (resolved_by) REFERENCES users(user_id) ON DELETE SET NULL,
       INDEX idx_incidents_detected (detected_at),
       INDEX idx_incidents_status (status, detected_at),
       INDEX idx_incidents_bike (bike_id, detected_at),
-      INDEX idx_incidents_type (incident_type, detected_at)
+      INDEX idx_incidents_type (incident_type, detected_at),
+      INDEX idx_incidents_user (user_id)
     ) ENGINE=InnoDB`,
   );
+};
+
+/**
+ * Jaring pengaman untuk instalasi lama yang belum menjalankan
+ * migration_auth_incident_refactor.sql: tambahkan kolom atribusi penyewa
+ * bila belum ada. Kegagalan tidak boleh menghentikan startup backend.
+ */
+const ensureColumns = async () => {
+  try {
+    const [columns] = await db.query(
+      `SELECT COLUMN_NAME AS name
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'security_incidents'`,
+    );
+
+    const existing = new Set(
+      columns.map((column) => String(column.name).toLowerCase()),
+    );
+
+    if (!existing.has("user_id")) {
+      await db.query(
+        "ALTER TABLE security_incidents ADD COLUMN user_id INT NULL AFTER bike_id",
+      );
+    }
+
+    if (!existing.has("rental_id")) {
+      await db.query(
+        "ALTER TABLE security_incidents ADD COLUMN rental_id INT NULL AFTER user_id",
+      );
+    }
+  } catch (error) {
+    console.warn(
+      "[INCIDENT] Gagal memastikan kolom atribusi insiden:",
+      error.message,
+    );
+  }
 };
 
 const toBooleanOrNull = (value) => {
@@ -70,6 +123,9 @@ const toBooleanOrNull = (value) => {
  * Membuka insiden baru atau memperbarui insiden aktif dengan tipe yang
  * sama. Dengan cara ini satu kejadian tamper/geofence tidak dicatat
  * berulang kali untuk setiap paket telemetri.
+ *
+ * userId & rentalId dipakai untuk atribusi penyewa saat pelanggaran
+ * terjadi (ditampilkan di halaman Insiden & notifikasi WA admin).
  */
 const openIncident = async ({
   bikeId,
@@ -82,6 +138,8 @@ const openIncident = async ({
   speed = null,
   lockState = null,
   mpuMotion = null,
+  userId = null,
+  rentalId = null,
 }) => {
   const incidentType = normalizeType(type);
 
@@ -111,7 +169,9 @@ const openIncident = async ({
            distance_m = COALESCE(?, distance_m),
            speed = COALESCE(?, speed),
            lock_state = COALESCE(?, lock_state),
-           mpu_motion = COALESCE(?, mpu_motion)
+           mpu_motion = COALESCE(?, mpu_motion),
+           user_id = COALESCE(?, user_id),
+           rental_id = COALESCE(?, rental_id)
        WHERE incident_id = ?`,
       [
         latitude,
@@ -120,6 +180,8 @@ const openIncident = async ({
         speed,
         toBooleanOrNull(lockState),
         toBooleanOrNull(mpuMotion),
+        userId,
+        rentalId,
         incidentId,
       ],
     );
@@ -129,13 +191,15 @@ const openIncident = async ({
 
   const [result] = await db.query(
     `INSERT INTO security_incidents
-      (bike_id, incident_type, severity, status, message,
+      (bike_id, user_id, rental_id, incident_type, severity, status, message,
        latitude, longitude, distance_m, speed, lock_state, mpu_motion,
        detected_at, last_seen_at)
-     VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,
+     VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,
              CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
     [
       bikeId,
+      userId,
+      rentalId,
       incidentType,
       severity,
       message || "Insiden keamanan terdeteksi.",
@@ -175,10 +239,49 @@ const resolveIncidents = async (bikeId, types) => {
   return result.affectedRows;
 };
 
+/**
+ * Menutup insiden terkait pelanggaran sewa (OVERDUE/OVERDUE_MOVEMENT)
+ * saat sesi diakhiri atau diperpanjang. Kegagalan tidak boleh
+ * mengganggu transaksi utama.
+ */
+const resolveRentalIncidents = async (bikeId) =>
+  resolveIncidents(bikeId, ["OVERDUE", "OVERDUE_MOVEMENT"]);
+
+/**
+ * Konteks sewa aktif untuk sebuah sepeda: dipakai untuk atribusi
+ * penyewa pada insiden dan notifikasi WhatsApp admin.
+ */
+const getActiveRentalContext = async (bikeId) => {
+  if (!bikeId) return null;
+
+  const [rows] = await db.query(
+    `SELECT r.rental_id,
+            r.user_id,
+            r.rental_status,
+            r.end_time,
+            r.duration_minutes,
+            u.name AS user_name,
+            u.phone_number AS user_phone
+     FROM rentals r
+     JOIN users u ON u.user_id = r.user_id
+     WHERE r.bike_id = ?
+       AND r.rental_status IN ('ACTIVE', 'WARNING_SENT', 'OVERDUE')
+     ORDER BY r.rental_id DESC
+     LIMIT 1`,
+    [bikeId],
+  );
+
+  return rows.length > 0 ? rows[0] : null;
+};
+
 const mapIncident = (row) => ({
   incident_id: row.incident_id,
   bike_id: row.bike_id,
   bike_name: row.bike_name || null,
+  user_id: row.user_id ?? null,
+  rental_id: row.rental_id ?? null,
+  renter_name: row.renter_name || null,
+  renter_phone: row.renter_phone || null,
   incident_type: row.incident_type,
   severity: row.severity,
   status: row.status,
@@ -256,9 +359,10 @@ const listIncidents = async ({
     conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
   const [rows] = await db.query(
-    `SELECT i.*, b.name AS bike_name
+    `SELECT i.*, b.name AS bike_name, u.name AS renter_name, u.phone_number AS renter_phone
      FROM security_incidents i
      LEFT JOIN bikes b ON b.bike_id = i.bike_id
+     LEFT JOIN users u ON u.user_id = i.user_id
      ${whereClause}
      ORDER BY i.incident_id DESC
      LIMIT ${safeLimit}`,
@@ -283,6 +387,7 @@ const listIncidents = async ({
 const init = async () => {
   try {
     await ensureTable();
+    await ensureColumns();
     console.log("[INCIDENT] Tabel security_incidents siap digunakan.");
   } catch (error) {
     console.warn(
@@ -297,5 +402,7 @@ module.exports = {
   ensureTable,
   openIncident,
   resolveIncidents,
+  resolveRentalIncidents,
+  getActiveRentalContext,
   listIncidents,
 };

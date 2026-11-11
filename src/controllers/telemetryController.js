@@ -3,7 +3,7 @@ const redisClient = require("../config/redis");
 const mqttClient = require("../config/mqtt");
 const station = require("../config/station");
 const { isOutsideGeofence } = require("../services/geofenceService");
-const { sendSecurityAlert } = require("../services/notificationService");
+const { sendIncidentNotification } = require("../services/notificationService");
 const incidentService = require("../services/incidentService");
 
 const toNumberOrNull = (value) => {
@@ -28,6 +28,13 @@ const toBoolean = (value, fallback = false) => {
 
   return fallback;
 };
+
+/**
+ * Ambang kecepatan (km/jam) untuk menyimpulkan sepeda "masih berjalan"
+ * saat waktu sewa sudah habis. Nilai kecil di bawah ambang dianggap
+ * noise GPS NEO-6M saat diam.
+ */
+const OVERDUE_MOVEMENT_SPEED_KMH = 3;
 
 const buildLocationKey = (bikeId) => `bike:${bikeId}:location`;
 const buildAlertKey = (bikeId) => `bike:${bikeId}:alert`;
@@ -91,6 +98,22 @@ const safeResolveIncidents = async (bikeId, types) => {
 };
 
 /**
+ * Konteks sewa aktif (penyewa) untuk atribusi insiden & notifikasi.
+ * Kegagalan query tidak boleh menghentikan engine keamanan.
+ */
+const safeGetRentalContext = async (bikeId) => {
+  try {
+    return await incidentService.getActiveRentalContext(bikeId);
+  } catch (error) {
+    console.warn(
+      `[INCIDENT] Gagal membaca konteks sewa ${bikeId}:`,
+      error.message,
+    );
+    return null;
+  }
+};
+
+/**
  * Cooldown mencegah WA dan alarm MQTT dikirim berulang untuk getaran yang
  * sama. Data telemetri dan status dashboard tetap diperbarui setiap paket.
  */
@@ -138,7 +161,39 @@ const publishAlarm = (bikeId, reason) => {
   });
 };
 
-const sendAlertAndTrack = (bikeId, reason) => {
+/**
+ * Menerjemahkan reason mentah engine keamanan menjadi label pelanggaran
+ * yang mudah dibaca admin di WhatsApp.
+ */
+const buildViolationLabel = (reason) => {
+  const parts = String(reason || "")
+    .split(" + ")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  const labels = parts.map((part) => {
+    if (part.startsWith("TAMPER_DETECTED_MPU6050")) {
+      return "MANIPULASI PAKSA (TAMPER)";
+    }
+    if (part.startsWith("GEOFENCE_VIOLATION")) {
+      return "KELUAR BATAS AREA (GEOFENCE)";
+    }
+    return part;
+  });
+
+  return labels.length > 0 ? labels.join(" + ") : "TIDAK DIKETAHUI";
+};
+
+/**
+ * Notifikasi WA pelanggaran ke admin dengan format lengkap:
+ * ID Sepeda, Nama Penyewa, Jenis Pelanggaran, Waktu, dan Link Insiden.
+ */
+const sendAlertAndTrack = (
+  bikeId,
+  reason,
+  rentalContext = null,
+  location = null,
+) => {
   const adminPhone = process.env.ADMIN_PHONE_NUMBER;
   const notifiedAt = new Date().toISOString();
 
@@ -151,7 +206,16 @@ const sendAlertAndTrack = (bikeId, reason) => {
     return;
   }
 
-  void sendSecurityAlert(adminPhone, bikeId, reason)
+  void sendIncidentNotification(adminPhone, {
+    bikeId,
+    userName: rentalContext?.user_name || null,
+    userPhone: rentalContext?.user_phone || null,
+    typeLabel: buildViolationLabel(reason),
+    message: "Sistem telah membunyikan alarm sirene pada sepeda.",
+    detectedAt: new Date(),
+    latitude: location?.lat ?? null,
+    longitude: location?.lng ?? null,
+  })
     .then((sent) => {
       void updateAlertCache(bikeId, {
         notified: String(sent),
@@ -226,6 +290,12 @@ const handleTelemetry = async (topic, message) => {
     const speed = toNumberOrNull(payload.speed) ?? 0;
     const mpuMotion = toBoolean(payload.mpu_motion, false);
     const lockState = toBoolean(payload.lock_state, true);
+
+    // Baterai dari perception layer (persen 0-100, opsional).
+    const rawBattery = toNumberOrNull(payload.battery);
+    const batteryPercent =
+      rawBattery === null ? null : Math.min(100, Math.max(0, rawBattery));
+
     const now = new Date();
     const nowIso = now.toISOString();
 
@@ -233,14 +303,20 @@ const handleTelemetry = async (topic, message) => {
     //    Kegagalan Redis tidak boleh menghentikan engine keamanan & update MySQL.
     try {
       if (redisClient.isReady) {
-        await redisClient.hSet(buildLocationKey(bikeId), {
+        const cacheValues = {
           lat: String(lat),
           lng: String(lng),
           speed: String(speed),
           lock_state: String(lockState),
           mpu_motion: String(mpuMotion),
           updated_at: nowIso,
-        });
+        };
+
+        if (batteryPercent !== null) {
+          cacheValues.battery = String(batteryPercent);
+        }
+
+        await redisClient.hSet(buildLocationKey(bikeId), cacheValues);
       }
     } catch (cacheError) {
       console.warn(
@@ -286,13 +362,70 @@ const handleTelemetry = async (topic, message) => {
 
     const alertReason = alertReasons.join(" + ");
 
-    // Update koordinat dan status kunci setiap paket.
+    // Konteks sewa aktif untuk atribusi penyewa pada insiden & notifikasi.
+    const rentalContext = await safeGetRentalContext(bikeId);
+
+    // Update koordinat, status kunci, dan baterai setiap paket.
     await db.query(
-      `UPDATE bikes
-       SET last_latitude = ?, last_longitude = ?, lock_state = ?
-       WHERE bike_id = ?`,
-      [lat, lng, lockState, bikeId],
+      batteryPercent !== null
+        ? `UPDATE bikes
+           SET last_latitude = ?, last_longitude = ?, lock_state = ?, battery_percent = ?
+           WHERE bike_id = ?`
+        : `UPDATE bikes
+           SET last_latitude = ?, last_longitude = ?, lock_state = ?
+           WHERE bike_id = ?`,
+      batteryPercent !== null
+        ? [lat, lng, lockState, batteryPercent, bikeId]
+        : [lat, lng, lockState, bikeId],
     );
+
+    // 3.5 Pelanggaran sewa: waktu sewa habis tetapi sepeda masih berjalan.
+    if (rentalContext?.rental_status === "OVERDUE") {
+      const bikeMoving =
+        speed >= OVERDUE_MOVEMENT_SPEED_KMH || mpuMotion === true;
+
+      if (bikeMoving) {
+        const overdueResult = await safeOpenIncident({
+          bikeId,
+          type: "OVERDUE_MOVEMENT",
+          severity: "HIGH",
+          message:
+            "Waktu sewa telah habis tetapi sepeda masih terdeteksi bergerak.",
+          latitude: lat,
+          longitude: lng,
+          speed,
+          lockState,
+          mpuMotion,
+          userId: rentalContext.user_id,
+          rentalId: rentalContext.rental_id,
+        });
+
+        const shouldNotifyOverdue =
+          overdueResult.created &&
+          (await claimAlertCooldown(bikeId, "overdue_movement"));
+
+        if (shouldNotifyOverdue) {
+          const adminPhone = process.env.ADMIN_PHONE_NUMBER;
+
+          if (adminPhone) {
+            void sendIncidentNotification(adminPhone, {
+              bikeId,
+              userName: rentalContext.user_name,
+              userPhone: rentalContext.user_phone,
+              typeLabel: "SEWA HABIS — SEPEDA MASIH DIGUNAKAN",
+              message: `Durasi sewa ${rentalContext.duration_minutes} menit telah berakhir (sejak ${rentalContext.end_time}), namun sepeda masih bergerak (kecepatan ${speed} km/jam).`,
+              detectedAt: new Date(),
+              latitude: lat,
+              longitude: lng,
+            });
+          }
+        }
+
+        console.warn(
+          `[! OVERDUE MOVEMENT !] Sepeda ${bikeId} melewati batas waktu sewa tetapi masih bergerak.`,
+        );
+      }
+    }
 
     if (tamperDetected || geofenceViolated) {
       const newBikeStatus = tamperDetected
@@ -332,6 +465,8 @@ const handleTelemetry = async (topic, message) => {
             speed,
             lockState,
             mpuMotion,
+            userId: rentalContext?.user_id ?? null,
+            rentalId: rentalContext?.rental_id ?? null,
           }),
         );
       }
@@ -349,6 +484,8 @@ const handleTelemetry = async (topic, message) => {
             speed,
             lockState,
             mpuMotion,
+            userId: rentalContext?.user_id ?? null,
+            rentalId: rentalContext?.rental_id ?? null,
           }),
         );
       }
@@ -381,7 +518,10 @@ const handleTelemetry = async (topic, message) => {
         // Buzzer yang sudah dimatikan admin tidak boleh langsung menyala
         // lagi sebelum ada insiden baru.
         if (!alarmMuted) publishAlarm(bikeId, alertReason);
-        sendAlertAndTrack(bikeId, alertReason);
+        sendAlertAndTrack(bikeId, alertReason, rentalContext, {
+          lat,
+          lng,
+        });
       }
 
       if (tamperDetected) {

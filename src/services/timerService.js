@@ -1,10 +1,11 @@
 const db = require("../config/db");
 const redisClient = require("../config/redis");
 const mqttClient = require("../config/mqtt");
+const incidentService = require("./incidentService");
 const {
   sendTimeWarning,
   sendRentalExpired,
-  sendSecurityAlert,
+  sendIncidentNotification,
 } = require("./notificationService");
 
 // Ambang batas waktu peringatan (misal: 5 menit sebelum sewa habis)
@@ -106,6 +107,7 @@ const processRentalTimer = async (rentalId) => {
          r.end_time,
          r.rental_status,
          r.payment_status,
+         r.duration_minutes,
          u.phone_number,
          u.name AS user_name
        FROM rentals r
@@ -157,6 +159,26 @@ const processRentalTimer = async (rentalId) => {
 
       await connection.commit();
 
+      // Catat insiden pelanggaran: waktu sewa habis.
+      // Best-effort: kegagalan pencatatan tidak boleh menghentikan
+      // penguncian sepeda dan notifikasi.
+      try {
+        await incidentService.openIncident({
+          bikeId: rental.bike_id,
+          type: "OVERDUE",
+          severity: "HIGH",
+          message: `Waktu sewa habis (durasi ${rental.duration_minutes} menit). Sepeda dikunci otomatis.`,
+          lockState: true,
+          userId: rental.user_id,
+          rentalId: rental.rental_id,
+        });
+      } catch (incidentError) {
+        console.warn(
+          `[INCIDENT] Gagal mencatat insiden OVERDUE ${rental.bike_id}:`,
+          incidentError.message,
+        );
+      }
+
       void updateBikeCache(rental.bike_id, true);
       void publishBikeCommandSafely(rental.bike_id, {
         action: "LOCK_AND_ALARM",
@@ -171,11 +193,14 @@ const processRentalTimer = async (rentalId) => {
 
       const adminPhone = process.env.ADMIN_PHONE_NUMBER;
       if (adminPhone) {
-        void sendSecurityAlert(
-          adminPhone,
-          rental.bike_id,
-          "RENTAL_TIME_EXPIRED",
-        );
+        void sendIncidentNotification(adminPhone, {
+          bikeId: rental.bike_id,
+          userName: rental.user_name,
+          userPhone: rental.phone_number,
+          typeLabel: "WAKTU SEWA HABIS (OVERDUE)",
+          message: `Durasi sewa ${rental.duration_minutes} menit telah berakhir dan sepeda dikunci otomatis.`,
+          detectedAt: new Date(),
+        });
       }
 
       console.warn(

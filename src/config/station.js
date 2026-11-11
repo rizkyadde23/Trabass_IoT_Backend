@@ -22,6 +22,10 @@ const station = {
     process.env.TAMPER_ALERT_RESET_SECONDS,
     120,
   ),
+  lowBatteryThresholdPercent: toFiniteNumber(
+    process.env.BATTERY_LOW_THRESHOLD_PERCENT,
+    20,
+  ),
 };
 
 module.exports = station;
