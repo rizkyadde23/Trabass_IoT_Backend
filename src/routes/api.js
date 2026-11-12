@@ -48,6 +48,9 @@ router.delete('/admin/bikes/:bike_id', adminMiddleware, adminController.deleteBi
 router.get('/admin/bikes/:bike_id', adminMiddleware, adminController.getBikeDetail);
 router.get('/admin/bikes/:bike_id/telemetry', adminMiddleware, adminController.getBikeTelemetry);
 
+// Akhiri sesi sewa penyewa dari dashboard admin (sepeda kembali AVAILABLE)
+router.post('/admin/bikes/:bike_id/end-rental', adminMiddleware, paymentController.adminEndRental);
+
 // Pengaturan admin: pangkalan, radius geofence, dan pricing
 router.get('/admin/settings', adminMiddleware, settingsController.getSettings);
 router.put('/admin/settings', adminMiddleware, settingsController.updateSettings);
@@ -73,5 +76,8 @@ router.post('/rent/confirm-payment', paymentController.confirmRentPayment);
 
 // Endpoint Cek Status Pembayaran (read-only, untuk polling frontend)
 router.get('/rent/status/:order_id', paymentController.getRentStatus);
+
+// Endpoint Pemulihan Sesi: rental yang masih aktif milik user
+router.get('/rent/active', paymentController.getActiveRental);
 
 module.exports = router;

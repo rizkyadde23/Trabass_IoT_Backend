@@ -12,6 +12,7 @@ const {
   sendPaymentConflictAlert,
 } = require("../services/notificationService");
 const incidentService = require("../services/incidentService");
+const bikeCommandService = require("../services/bikeCommandService");
 
 // Inisialisasi Midtrans Snap Instance
 const snap = new midtransClient.Snap({
@@ -1576,6 +1577,305 @@ const finishRentSession = async (req, res) => {
 };
 
 // ---------------------------------------------------------------------------
+// Endpoint: Akhiri sesi sewa dari dashboard admin
+// POST /api/admin/bikes/:bike_id/end-rental
+// Menutup sesi aktif milik penyewa mana pun (atau membatalkan pembayaran awal
+// yang masih menunggu), lalu mengembalikan sepeda ke status AVAILABLE dengan
+// kunci tertutup. Berguna saat penyewa tidak mengembalikan sepeda / perangkat
+// penyewa hilang, sehingga admin dapat membebaskan sepeda dari dashboard.
+// ---------------------------------------------------------------------------
+const adminEndRental = async (req, res) => {
+  let connection;
+  let bikeId = "";
+  let pendingExtensionOrders = [];
+  let endedRental = null;
+
+  try {
+    bikeId = String(req.params.bike_id || "")
+      .trim()
+      .toUpperCase();
+
+    if (!bikeId) {
+      return res.status(400).json({
+        status: "error",
+        message: "ID sepeda wajib diisi.",
+      });
+    }
+
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    // Cari sesi aktif (tanpa lock) untuk mengetahui parent rental id.
+    const [activeCandidates] = await connection.query(
+      `SELECT rental_id
+       FROM rentals
+       WHERE bike_id = ?
+         AND rental_type = 'INITIAL'
+         AND rental_status IN ('ACTIVE', 'WARNING_SENT', 'OVERDUE')
+       ORDER BY rental_id DESC
+       LIMIT 1`,
+      [bikeId],
+    );
+
+    let message = "";
+    let cancelledOrderId = null;
+    let cancelledRentalId = null;
+
+    if (activeCandidates.length > 0) {
+      const parentRentalId = activeCandidates[0].rental_id;
+
+      // Urutan lock mengikuti finishRentSession: extension -> parent -> bike.
+      const [pendingExtensions] = await connection.query(
+        `SELECT rental_id, midtrans_order_id
+         FROM rentals
+         WHERE parent_rental_id = ?
+           AND payment_status = 'PENDING'
+         FOR UPDATE`,
+        [parentRentalId],
+      );
+
+      pendingExtensionOrders = pendingExtensions;
+
+      const [rentals] = await connection.query(
+        `SELECT r.*, u.name AS user_name, u.phone_number
+         FROM rentals r
+         JOIN users u ON u.user_id = r.user_id
+         WHERE r.rental_id = ?
+         FOR UPDATE`,
+        [parentRentalId],
+      );
+
+      if (
+        rentals.length === 0 ||
+        !["ACTIVE", "WARNING_SENT", "OVERDUE"].includes(
+          rentals[0].rental_status,
+        )
+      ) {
+        await connection.rollback();
+        return res.status(409).json({
+          status: "error",
+          message:
+            "Sesi sewa sudah berubah. Muat ulang halaman lalu coba lagi.",
+        });
+      }
+
+      endedRental = rentals[0];
+
+      const [bikes] = await connection.query(
+        "SELECT bike_id FROM bikes WHERE bike_id = ? FOR UPDATE",
+        [bikeId],
+      );
+
+      if (bikes.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({
+          status: "error",
+          message: `Sepeda ${bikeId} tidak ditemukan.`,
+        });
+      }
+
+      if (pendingExtensions.length > 0) {
+        await connection.query(
+          `UPDATE rentals
+           SET payment_status = 'CANCELLED',
+               rental_status = 'CANCELLED',
+               payment_processed_at = NOW()
+           WHERE parent_rental_id = ?
+             AND payment_status = 'PENDING'`,
+          [parentRentalId],
+        );
+      }
+
+      await connection.query(
+        `UPDATE rentals
+         SET rental_status = 'COMPLETED',
+             end_time = NOW()
+         WHERE rental_id = ?`,
+        [parentRentalId],
+      );
+
+      await connection.query(
+        `UPDATE bikes
+         SET status = 'AVAILABLE', lock_state = TRUE
+         WHERE bike_id = ?`,
+        [bikeId],
+      );
+
+      await connection.commit();
+
+      message = `Sesi sewa ${
+        endedRental.user_name || "penyewa"
+      } pada ${bikeId} berhasil diakhiri. Sepeda kembali tersedia.`;
+    } else {
+      // Tidak ada sesi aktif: batalkan sewa awal yang belum dibayar agar
+      // sepeda yang tertahan RESERVED bisa dipakai lagi.
+      const [pendingInitial] = await connection.query(
+        `SELECT rental_id, midtrans_order_id
+         FROM rentals
+         WHERE bike_id = ?
+           AND rental_type = 'INITIAL'
+           AND payment_status = 'PENDING'
+           AND rental_status = 'WAITING_PAYMENT'
+         ORDER BY rental_id DESC
+         LIMIT 1
+         FOR UPDATE`,
+        [bikeId],
+      );
+
+      const [bikes] = await connection.query(
+        "SELECT bike_id FROM bikes WHERE bike_id = ? FOR UPDATE",
+        [bikeId],
+      );
+
+      if (bikes.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({
+          status: "error",
+          message: `Sepeda ${bikeId} tidak ditemukan.`,
+        });
+      }
+
+      if (pendingInitial.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({
+          status: "error",
+          message: `Tidak ada sesi sewa aktif pada sepeda ${bikeId}.`,
+        });
+      }
+
+      cancelledRentalId = pendingInitial[0].rental_id;
+      cancelledOrderId = pendingInitial[0].midtrans_order_id;
+
+      await connection.query(
+        `UPDATE rentals
+         SET payment_status = 'CANCELLED',
+             rental_status = 'CANCELLED',
+             payment_processed_at = NOW()
+         WHERE rental_id = ?`,
+        [cancelledRentalId],
+      );
+
+      await connection.query(
+        `UPDATE bikes
+         SET status = 'AVAILABLE', lock_state = TRUE
+         WHERE bike_id = ?`,
+        [bikeId],
+      );
+
+      await connection.commit();
+
+      message = `Pembayaran yang belum selesai pada ${bikeId} dibatalkan. Sepeda kembali tersedia.`;
+    }
+
+    // --- Tindak lanjut best-effort (tidak membatalkan response) -----------
+    try {
+      await incidentService.resolveRentalIncidents(bikeId);
+    } catch (incidentError) {
+      console.warn(
+        `[INCIDENT] Gagal menutup insiden sewa ${bikeId}:`,
+        incidentError.message,
+      );
+    }
+
+    for (const extension of pendingExtensionOrders) {
+      if (!extension.midtrans_order_id) continue;
+      try {
+        await snap.transaction.cancel(extension.midtrans_order_id);
+      } catch (error) {
+        console.warn(
+          `[EXTEND CANCEL NOTICE] ${extension.midtrans_order_id}: ${error.message}`,
+        );
+      }
+    }
+
+    if (cancelledOrderId) {
+      try {
+        await snap.transaction.cancel(cancelledOrderId);
+      } catch (error) {
+        console.warn(
+          `[PAYMENT CANCEL NOTICE] ${cancelledOrderId}: ${error.message}`,
+        );
+      }
+    }
+
+    void updateBikeCache(bikeId, true);
+    void publishBikeCommandSafely(bikeId, {
+      action: "LOCK",
+      message: "Sesi sewa diakhiri oleh admin.",
+      timestamp: new Date().toISOString(),
+    });
+
+    if (endedRental?.phone_number) {
+      void sendReturnReceipt(
+        endedRental.phone_number,
+        endedRental.user_name,
+        bikeId,
+      );
+    }
+
+    await bikeCommandService.recordAuditLog({
+      adminUserId: req.user?.user_id || null,
+      bikeId,
+      action: "END_RENTAL",
+      mqttAction: "LOCK",
+      status: "SENT",
+      reason: endedRental
+        ? `Sesi #${endedRental.rental_id} diakhiri oleh admin.`
+        : `Pembayaran #${cancelledRentalId} dibatalkan oleh admin.`,
+    });
+
+    const state = endedRental
+      ? await getRentalPaymentState(endedRental.rental_id)
+      : null;
+
+    console.log(
+      `[ADMIN END RENTAL] ${bikeId} diakhiri oleh admin #${
+        req.user?.user_id || "-"
+      }.`,
+    );
+
+    return res.status(200).json({
+      status: "success",
+      message,
+      data: {
+        bike_id: bikeId,
+        bike_status: "AVAILABLE",
+        lock_state: true,
+        rental: state,
+        cancelled_order_id: cancelledOrderId,
+      },
+    });
+  } catch (error) {
+    if (connection) {
+      try {
+        await connection.rollback();
+      } catch (_) {
+        // Abaikan error rollback.
+      }
+    }
+
+    if (bikeId) {
+      await bikeCommandService.recordAuditLog({
+        adminUserId: req.user?.user_id || null,
+        bikeId,
+        action: "END_RENTAL",
+        mqttAction: "LOCK",
+        status: "FAILED",
+        errorMessage: error.message,
+      });
+    }
+
+    console.error("[ADMIN END RENTAL ERROR]", error.message);
+    return res.status(500).json({
+      status: "error",
+      message: "Gagal mengakhiri sesi sewa. Silakan coba lagi.",
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+// ---------------------------------------------------------------------------
 // Endpoint: Konfirmasi pembayaran dari client dengan verifikasi Midtrans
 // POST /api/rent/confirm-payment
 // ---------------------------------------------------------------------------
@@ -1772,6 +2072,119 @@ const getRentStatus = async (req, res) => {
 };
 
 // ---------------------------------------------------------------------------
+// Endpoint: Sesi sewa yang sedang berjalan milik user (pemulihan sesi)
+// GET /api/rent/active
+// Dipakai frontend saat tab/browser dibuka kembali. Sesi login penyewa
+// bertahan di localStorage, tetapi detail rental dipulihkan dari backend
+// agar halaman /active tetap dapat diakses untuk extend / pengembalian.
+// ---------------------------------------------------------------------------
+const getActiveRental = async (req, res) => {
+  try {
+    const userId = req.user.user_id;
+
+    const [activeRows] = await db.query(
+      `SELECT rental_id
+       FROM rentals
+       WHERE user_id = ?
+         AND rental_status IN ('ACTIVE', 'WARNING_SENT', 'OVERDUE')
+       ORDER BY rental_id DESC
+       LIMIT 1`,
+      [userId],
+    );
+
+    let rentalId = activeRows[0]?.rental_id ?? null;
+
+    if (!rentalId) {
+      // Perpanjangan yang masih menunggu pembayaran: sesi yang berlaku
+      // tetap parent rental yang sedang aktif.
+      const [extensionRows] = await db.query(
+        `SELECT r.parent_rental_id
+         FROM rentals r
+         JOIN rentals p ON p.rental_id = r.parent_rental_id
+         WHERE r.user_id = ?
+           AND r.rental_status = 'WAITING_EXTEND'
+           AND p.rental_status IN ('ACTIVE', 'WARNING_SENT', 'OVERDUE')
+         ORDER BY r.rental_id DESC
+         LIMIT 1`,
+        [userId],
+      );
+
+      if (extensionRows.length > 0 && extensionRows[0].parent_rental_id) {
+        rentalId = extensionRows[0].parent_rental_id;
+      }
+    }
+
+    // Sewa awal yang belum dibayar (pending payment) dapat dilanjutkan
+    // lewat halaman /payment dengan bike_id yang sama.
+    let pendingPayment = null;
+
+    if (!rentalId) {
+      const [pendingRows] = await db.query(
+        `SELECT rental_id
+         FROM rentals
+         WHERE user_id = ?
+           AND payment_status = 'PENDING'
+           AND rental_status = 'WAITING_PAYMENT'
+         ORDER BY rental_id DESC
+         LIMIT 1`,
+        [userId],
+      );
+
+      if (pendingRows.length > 0) {
+        const pendingState = await getRentalPaymentState(
+          pendingRows[0].rental_id,
+        );
+
+        if (pendingState) {
+          pendingPayment = {
+            bike_id: pendingState.bike_id,
+            order_id: pendingState.midtrans_order_id,
+            duration_minutes: pendingState.duration_minutes,
+            amount: pendingState.amount,
+            rental_status: pendingState.rental_status,
+            payment_status: pendingState.payment_status,
+          };
+        }
+      }
+    }
+
+    const activeState = rentalId
+      ? await getRentalPaymentState(rentalId)
+      : null;
+
+    const bikeId = activeState?.bike_id || pendingPayment?.bike_id || null;
+
+    let bike = null;
+
+    if (bikeId) {
+      const [bikeRows] = await db.query(
+        "SELECT bike_id, name, status FROM bikes WHERE bike_id = ? LIMIT 1",
+        [bikeId],
+      );
+
+      bike = bikeRows[0] || null;
+    }
+
+    return res.status(200).json({
+      status: "success",
+      data: {
+        active_rental: activeState,
+        pending_payment: pendingPayment,
+        bike: bike
+          ? { bike_id: bike.bike_id, name: bike.name, status: bike.status }
+          : null,
+      },
+    });
+  } catch (error) {
+    console.error("[ACTIVE RENTAL ERROR]", error.message);
+    return res.status(500).json({
+      status: "error",
+      message: "Gagal memuat sesi sewa aktif.",
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
 // Endpoint: Konfigurasi tarif & batas sewa (dipakai frontend)
 // GET /api/config/pricing
 // ---------------------------------------------------------------------------
@@ -1793,7 +2206,9 @@ module.exports = {
   handlePaymentNotification,
   extendRentTransaction,
   finishRentSession,
+  adminEndRental,
   confirmRentPayment,
   getRentStatus,
+  getActiveRental,
   getPaymentConfig,
 };

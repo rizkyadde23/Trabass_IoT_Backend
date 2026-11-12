@@ -222,10 +222,52 @@ const getBikeDetail = async (req, res) => {
       readAlertState(bikeId),
     ]);
 
+    // Sesi sewa yang sedang berjalan (dipakai tombol "Akhiri Sesi" di
+    // dashboard admin). Sesi aktif selalu berupa rental INITIAL; bila belum
+    // ada, tampilkan pembayaran awal yang masih menunggu.
+    const [activeRentalRows] = await db.query(
+      `SELECT r.rental_id, r.user_id, r.rental_type, r.rental_status,
+              r.payment_status, r.duration_minutes, r.amount,
+              r.start_time, r.end_time,
+              u.name AS user_name, u.phone_number
+       FROM rentals r
+       JOIN users u ON u.user_id = r.user_id
+       WHERE r.bike_id = ?
+         AND r.rental_type = 'INITIAL'
+         AND r.rental_status IN ('ACTIVE', 'WARNING_SENT', 'OVERDUE')
+       ORDER BY r.rental_id DESC
+       LIMIT 1`,
+      [bikeId],
+    );
+
+    const activeRental = activeRentalRows[0] || null;
+    let pendingPayment = null;
+
+    if (!activeRental) {
+      const [pendingPaymentRows] = await db.query(
+        `SELECT r.rental_id, r.user_id, r.rental_status, r.payment_status,
+                r.duration_minutes, r.amount, r.start_time, r.end_time,
+                u.name AS user_name, u.phone_number
+         FROM rentals r
+         JOIN users u ON u.user_id = r.user_id
+         WHERE r.bike_id = ?
+           AND r.rental_type = 'INITIAL'
+           AND r.payment_status = 'PENDING'
+           AND r.rental_status = 'WAITING_PAYMENT'
+         ORDER BY r.rental_id DESC
+         LIMIT 1`,
+        [bikeId],
+      );
+
+      pendingPayment = pendingPaymentRows[0] || null;
+    }
+
     return res.status(200).json({
       status: "success",
       data: {
         bike: mapBike(rows[0], liveLocation, alertState),
+        active_rental: activeRental,
+        pending_payment: pendingPayment,
         geofence: {
           lat: station.lat,
           lng: station.lng,

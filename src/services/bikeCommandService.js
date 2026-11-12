@@ -27,6 +27,18 @@ const ADMIN_ACTIONS = {
 
 const VALID_ACTION_KEYS = new Set(Object.keys(ADMIN_ACTIONS));
 const VALID_LOG_STATUSES = new Set(["SENT", "FAILED"]);
+
+// Aksi yang tercatat di audit tetapi bukan perintah MQTT murni.
+const AUDIT_ACTION_LABELS = {
+  END_RENTAL: "Akhiri Sesi Sewa",
+};
+
+// Aksi yang dapat difilter di riwayat: perintah MQTT + aksi audit admin.
+const VALID_FILTER_ACTIONS = new Set([
+  ...VALID_ACTION_KEYS,
+  ...Object.keys(AUDIT_ACTION_LABELS),
+]);
+
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
 
@@ -319,7 +331,9 @@ const mapCommandLog = (row) => ({
   bike_name: row.bike_name || null,
   action: row.action,
   action_label:
-    ADMIN_ACTIONS[row.action]?.label || row.action,
+    ADMIN_ACTIONS[row.action]?.label ||
+    AUDIT_ACTION_LABELS[row.action] ||
+    row.action,
   mqtt_action: row.mqtt_action,
   status: row.status,
   reason: row.reason,
@@ -350,7 +364,7 @@ const listCommandLogs = async ({
     params.push(String(bikeId).trim());
   }
 
-  if (VALID_ACTION_KEYS.has(normalizedAction)) {
+  if (VALID_FILTER_ACTIONS.has(normalizedAction)) {
     conditions.push("c.action = ?");
     params.push(normalizedAction);
   }
@@ -405,10 +419,18 @@ const init = async () => {
   }
 };
 
+/**
+ * Mencatat aksi admin non-MQTT (mis. mengakhiri sesi sewa) ke audit yang
+ * sama dengan perintah remote.
+ */
+const recordAuditLog = (entry) => writeLog(entry);
+
 module.exports = {
   init,
   ensureTable,
   sendCommand,
   listCommandLogs,
+  recordAuditLog,
+  AUDIT_ACTION_LABELS,
   ADMIN_ACTIONS,
 };
