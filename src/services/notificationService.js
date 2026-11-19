@@ -1,5 +1,4 @@
 const axios = require("axios");
-const mqttClient = require("../config/mqtt");
 require("dotenv").config();
 
 /**
@@ -12,7 +11,9 @@ const formatDateTime = (value) => {
 };
 
 /**
- * Mengirim pesan WhatsApp via Fonnte API dengan Fallback ke MQTT/GSM SMS
+ * Mengirim pesan WhatsApp via Fonnte API.
+ * Catatan M6: firmware tidak lagi punya layanan SMS (GPRS-only), jadi
+ * kegagalan WA hanya dicatat, tidak diteruskan sebagai command SEND_SMS.
  * @param {string} target Nomor WhatsApp (contoh: '08123456789' atau '628123456789')
  * @param {string} message Isi pesan notifikasi
  * @param {string} bikeId ID Sepeda (opsional, untuk fallback GSM)
@@ -48,24 +49,11 @@ const sendWhatsApp = async (target, message, bikeId = null) => {
   } catch (error) {
     console.error(`[WA ERROR] Gagal kirim WA ke ${target}:`, error.message);
 
-    // -------------------------------------------------------------
-    // FALLBACK MECHANISM: Jika WA gagal/offline, minta GSM Module ESP32 kirim SMS
-    // -------------------------------------------------------------
-    if (bikeId) {
-      console.warn(
-        `[SMS FALLBACK] Mengirim instruksi SMS via ESP32 GSM Module untuk ${bikeId}...`,
-      );
-      const commandTopic = `bike/command/${bikeId}`;
-      mqttClient.publish(
-        commandTopic,
-        JSON.stringify({
-          action: "SEND_SMS",
-          target_phone: target,
-          message: message.substring(0, 140), // Batasi 140 karakter SMS
-        }),
-        { qos: 1 },
-      );
-    }
+    // M6: tidak ada fallback SMS. Firmware memakai SIM800L untuk GPRS,
+    // bukan SMS. Simpan jejak agar gateway/operator bisa ditindaklanjuti.
+    console.warn(
+      `[WA GAGAL] Tidak ada fallback SMS (firmware GPRS-only). bike=${bikeId || "-"} target=${target}`,
+    );
     return false;
   }
 };

@@ -14,10 +14,11 @@ const client = mqtt.connect(brokerUrl, {
 client.on('connect', () => {
   console.log('[MQTT] Berhasil terhubung ke Mosquitto MQTT Broker');
   
-  // Automatis subscribe ke seluruh data telemetri sepeda
-  client.subscribe('bike/telemetry/+', (err) => {
+  // Broker publik: pakai namespace trabass/ agar tidak tabrakan dengan
+  // perangkat lain. Firmware publish ke trabass/<bikeId>/telemetry.
+  client.subscribe('trabass/+/telemetry', (err) => {
     if (!err) {
-      console.log('[MQTT] Subscribed ke topik: bike/telemetry/+');
+      console.log('[MQTT] Subscribed ke topik: trabass/+/telemetry');
     } else {
       console.error('[MQTT ERROR] Gagal subscribe ke topik:', err.message);
     }

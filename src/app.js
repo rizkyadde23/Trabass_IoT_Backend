@@ -22,7 +22,7 @@ app.use('/api', apiRoutes); // <--- Register Prefix /api
 
 // Listener Telemetri MQTT
 mqttClient.on('message', (topic, message) => {
-  if (topic.startsWith('bike/telemetry/')) {
+  if (topic.startsWith('trabass/') && topic.endsWith('/telemetry')) {
     telemetryController.handleTelemetry(topic, message);
   }
 });

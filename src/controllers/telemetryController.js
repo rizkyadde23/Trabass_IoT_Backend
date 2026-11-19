@@ -141,7 +141,7 @@ const claimAlertCooldown = async (bikeId, type) => {
 };
 
 const publishAlarm = (bikeId, reason) => {
-  const commandTopic = `bike/command/${bikeId}`;
+  const commandTopic = `trabass/${bikeId}/command`;
   const commandPayload = JSON.stringify({
     action: "ALARM_ON",
     reason,
@@ -277,15 +277,21 @@ const resolveBikeStatusAfterAlert = async (bikeId, targetStatuses) => {
 
 const handleTelemetry = async (topic, message) => {
   try {
+    // Format baru: trabass/<bikeId>/telemetry. Toleran terhadap format lama
+    // bike/telemetry/<bikeId> untuk data yang masih antre di broker.
     const topicParts = topic.split("/");
-    const bikeId = topicParts[2];
+    const bikeId =
+      topicParts[0] === "trabass" ? topicParts[1] : topicParts[2];
     if (!bikeId) return;
 
     const payload = JSON.parse(message.toString());
     const lat = toNumberOrNull(payload.lat);
     const lng = toNumberOrNull(payload.lng);
 
-    if (lat === null || lng === null) return;
+    // M3: telemetri tetap diproses saat GPS belum fix. Koordinat null
+    // berarti tidak ada fix segar; IMU/lock/baterai tetap diperbarui,
+    // tetapi log koordinat dan geofence dilewati.
+    const hasFix = lat !== null && lng !== null;
 
     const speed = toNumberOrNull(payload.speed) ?? 0;
     const mpuMotion = toBoolean(payload.mpu_motion, false);
@@ -303,9 +309,8 @@ const handleTelemetry = async (topic, message) => {
     //    Kegagalan Redis tidak boleh menghentikan engine keamanan & update MySQL.
     try {
       if (redisClient.isReady) {
+        const locationKey = buildLocationKey(bikeId);
         const cacheValues = {
-          lat: String(lat),
-          lng: String(lng),
           speed: String(speed),
           lock_state: String(lockState),
           mpu_motion: String(mpuMotion),
@@ -316,7 +321,19 @@ const handleTelemetry = async (topic, message) => {
           cacheValues.battery = String(batteryPercent);
         }
 
-        await redisClient.hSet(buildLocationKey(bikeId), cacheValues);
+        if (hasFix) {
+          cacheValues.lat = String(lat);
+          cacheValues.lng = String(lng);
+        }
+
+        await redisClient.hSet(locationKey, cacheValues);
+
+        // Tanpa fix: hapus koordinat lama agar dashboard tidak
+        // menampilkan posisi basi (marker hilang, data lain tetap ada).
+        // node-redis v4 menerima array field pada hDel.
+        if (!hasFix) {
+          await redisClient.hDel(locationKey, ["lat", "lng"]);
+        }
       }
     } catch (cacheError) {
       console.warn(
@@ -325,29 +342,34 @@ const handleTelemetry = async (topic, message) => {
       );
     }
 
-    // 2. Catat log ke database MySQL.
-    try {
-      await db.query(
-        `INSERT INTO telemetry_logs (bike_id, latitude, longitude, speed, mpu_motion, lock_state)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [bikeId, lat, lng, speed, mpuMotion, lockState],
-      );
-    } catch (logError) {
-      console.warn(
-        `[TELEMETRY LOG] Gagal mencatat log ${bikeId}:`,
-        logError.message,
-      );
+    // 2. Catat log ke database MySQL hanya jika ada koordinat.
+    //    Kolom telemetry_logs.latitude/longitude NOT NULL.
+    if (hasFix) {
+      try {
+        await db.query(
+          `INSERT INTO telemetry_logs (bike_id, latitude, longitude, speed, mpu_motion, lock_state)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [bikeId, lat, lng, speed, mpuMotion, lockState],
+        );
+      } catch (logError) {
+        console.warn(
+          `[TELEMETRY LOG] Gagal mencatat log ${bikeId}:`,
+          logError.message,
+        );
+      }
     }
 
     // 3. Security engine.
     const alertState = await readAlertCache(bikeId);
-    const geofenceCheck = isOutsideGeofence(
-      lat,
-      lng,
-      station.lat,
-      station.lng,
-      station.radiusMeter,
-    );
+    const geofenceCheck = hasFix
+      ? isOutsideGeofence(
+          lat,
+          lng,
+          station.lat,
+          station.lng,
+          station.radiusMeter,
+        )
+      : { isViolated: false, distanceMeter: null };
 
     const tamperDetected = lockState === true && mpuMotion === true;
     const geofenceViolated = geofenceCheck.isViolated;
@@ -365,19 +387,36 @@ const handleTelemetry = async (topic, message) => {
     // Konteks sewa aktif untuk atribusi penyewa pada insiden & notifikasi.
     const rentalContext = await safeGetRentalContext(bikeId);
 
-    // Update koordinat, status kunci, dan baterai setiap paket.
-    await db.query(
-      batteryPercent !== null
-        ? `UPDATE bikes
-           SET last_latitude = ?, last_longitude = ?, lock_state = ?, battery_percent = ?
-           WHERE bike_id = ?`
-        : `UPDATE bikes
-           SET last_latitude = ?, last_longitude = ?, lock_state = ?
-           WHERE bike_id = ?`,
-      batteryPercent !== null
-        ? [lat, lng, lockState, batteryPercent, bikeId]
-        : [lat, lng, lockState, bikeId],
-    );
+    // Update koordinat hanya jika ada fix; tanpa fix arsip koordinat
+    // terakhir di MySQL tidak boleh tertimpa null. Status kunci dan
+    // baterai tetap diperbarui setiap paket.
+    if (hasFix) {
+      await db.query(
+        batteryPercent !== null
+          ? `UPDATE bikes
+             SET last_latitude = ?, last_longitude = ?, lock_state = ?, battery_percent = ?
+             WHERE bike_id = ?`
+          : `UPDATE bikes
+             SET last_latitude = ?, last_longitude = ?, lock_state = ?
+             WHERE bike_id = ?`,
+        batteryPercent !== null
+          ? [lat, lng, lockState, batteryPercent, bikeId]
+          : [lat, lng, lockState, bikeId],
+      );
+    } else {
+      await db.query(
+        batteryPercent !== null
+          ? `UPDATE bikes
+             SET lock_state = ?, battery_percent = ?
+             WHERE bike_id = ?`
+          : `UPDATE bikes
+             SET lock_state = ?
+             WHERE bike_id = ?`,
+        batteryPercent !== null
+          ? [lockState, batteryPercent, bikeId]
+          : [lockState, bikeId],
+      );
+    }
 
     // 3.5 Pelanggaran sewa: waktu sewa habis tetapi sepeda masih berjalan.
     if (rentalContext?.rental_status === "OVERDUE") {
@@ -549,9 +588,12 @@ const handleTelemetry = async (topic, message) => {
 
     const shouldResolveTamper =
       alertState.active === "true" && (!lockState || quietElapsed);
+    // Tanpa fix koordinat, geofence tidak dapat dievaluasi. Jangan
+    // menutup insiden geofence hanya karena datanya tidak lengkap.
     const shouldResolveGeofence =
-      alertState.type === "geofence" ||
-      String(alertState.reason || "").includes("GEOFENCE_VIOLATION");
+      hasFix &&
+      (alertState.type === "geofence" ||
+        String(alertState.reason || "").includes("GEOFENCE_VIOLATION"));
 
     // Tutup insiden di database berdasarkan kondisi telemetri saat ini.
     // Ini juga bekerja setelah backend restart walaupun cache Redis kosong.
@@ -561,7 +603,7 @@ const handleTelemetry = async (topic, message) => {
       incidentTypesToResolve.push("TAMPER");
     }
 
-    if (!geofenceViolated) {
+    if (hasFix && !geofenceViolated) {
       incidentTypesToResolve.push("GEOFENCE");
     }
 

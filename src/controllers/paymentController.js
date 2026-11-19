@@ -102,7 +102,7 @@ const mapMidtransEvent = (transactionStatus, fraudStatus) => {
 };
 
 const publishBikeCommand = (bikeId, payload) => {
-  const topic = `bike/command/${bikeId}`;
+  const topic = `trabass/${bikeId}/command`;
   return new Promise((resolve, reject) => {
     mqttClient.publish(topic, JSON.stringify(payload), { qos: 1 }, (error) => {
       if (error) reject(error);
@@ -125,9 +125,15 @@ const publishBikeCommandSafely = async (bikeId, payload) => {
 
 const updateBikeCache = async (bikeId, lockState) => {
   try {
-    await redisClient.hSet(`bike:${bikeId}:location`, {
+    const locationKey = `bike:${bikeId}:location`;
+
+    // Samakan dengan timerService: hanya update hash yang sudah punya
+    // data telemetri, dan jangan memalsukan updated_at.
+    const hasLiveCache = await redisClient.hExists(locationKey, "updated_at");
+    if (!hasLiveCache) return;
+
+    await redisClient.hSet(locationKey, {
       lock_state: lockState ? "true" : "false",
-      updated_at: new Date().toISOString(),
     });
   } catch (error) {
     console.error(

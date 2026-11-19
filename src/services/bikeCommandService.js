@@ -135,7 +135,7 @@ const publishCommand = (bikeId, payload) => {
     );
   }
 
-  const topic = `bike/command/${bikeId}`;
+  const topic = `trabass/${bikeId}/command`;
 
   return new Promise((resolve, reject) => {
     mqttClient.publish(
@@ -254,7 +254,7 @@ const sendCommand = async ({
     timestamp: sentAt,
   };
 
-  let topic = `bike/command/${normalizedBikeId}`;
+  let topic = `trabass/${normalizedBikeId}/command`;
 
   try {
     const publishResult = await publishCommand(normalizedBikeId, payload);

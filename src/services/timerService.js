@@ -15,7 +15,7 @@ const PAYMENT_EXPIRY_MINUTES = Number(
 );
 
 const publishBikeCommand = (bikeId, payload) => {
-  const topic = `bike/command/${bikeId}`;
+  const topic = `trabass/${bikeId}/command`;
   return new Promise((resolve, reject) => {
     mqttClient.publish(topic, JSON.stringify(payload), { qos: 1 }, (error) => {
       if (error) reject(error);
@@ -38,9 +38,16 @@ const publishBikeCommandSafely = async (bikeId, payload) => {
 
 const updateBikeCache = async (bikeId, lockState) => {
   try {
-    await redisClient.hSet(`bike:${bikeId}:location`, {
+    const locationKey = `bike:${bikeId}:location`;
+
+    // Jangan membuat/menyentuh cache live jika telemetri belum pernah
+    // mengisi updated_at. Tanpa guard ini dashboard bisa menganggap
+    // ada "live location" padahal hash hanya berisi status kunci.
+    const hasLiveCache = await redisClient.hExists(locationKey, "updated_at");
+    if (!hasLiveCache) return;
+
+    await redisClient.hSet(locationKey, {
       lock_state: lockState ? "true" : "false",
-      updated_at: new Date().toISOString(),
     });
   } catch (error) {
     console.error(
