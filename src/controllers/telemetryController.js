@@ -297,6 +297,17 @@ const handleTelemetry = async (topic, message) => {
     const mpuMotion = toBoolean(payload.mpu_motion, false);
     const lockState = toBoolean(payload.lock_state, true);
 
+    // Status transport/link dari firmware dipakai dashboard untuk
+    // membedakan "data lama" dengan "sedang failover ke GPRS".
+    const transport =
+      typeof payload.transport === "string"
+        ? payload.transport.slice(0, 16)
+        : null;
+    const linkState =
+      typeof payload.link_state === "string"
+        ? payload.link_state.slice(0, 32)
+        : null;
+
     // Baterai dari perception layer (persen 0-100, opsional).
     const rawBattery = toNumberOrNull(payload.battery);
     const batteryPercent =
@@ -316,6 +327,13 @@ const handleTelemetry = async (topic, message) => {
           mpu_motion: String(mpuMotion),
           updated_at: nowIso,
         };
+
+        if (transport) {
+          cacheValues.transport = transport;
+        }
+        if (linkState) {
+          cacheValues.link_state = linkState;
+        }
 
         if (batteryPercent !== null) {
           cacheValues.battery = String(batteryPercent);

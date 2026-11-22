@@ -86,6 +86,12 @@ const mapBike = (row, liveLocation, alertState) => {
   const mpuMotion = hasLiveLocation
     ? toBoolean(liveLocation.mpu_motion, false)
     : false;
+  const transport = hasLiveLocation
+    ? String(liveLocation.transport || "")
+    : "";
+  const linkState = hasLiveLocation
+    ? String(liveLocation.link_state || "")
+    : "";
 
   // Baterai dari perception layer: nilai live Redis diprioritaskan,
   // fallback ke kolom terakhir di MySQL.
@@ -128,6 +134,8 @@ const mapBike = (row, liveLocation, alertState) => {
     last_longitude: longitude,
     speed: hasLiveLocation ? toNumberOrNull(liveLocation.speed) : null,
     mpu_motion: mpuMotion,
+    transport,
+    link_state: linkState,
     battery_percent: batteryPercent,
     battery_low:
       batteryPercent !== null &&
